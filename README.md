@@ -77,6 +77,11 @@ recebido R$ 2.475,94, base R$ 2.952,21 e envelope Compras com R$ 5,54.
 No topo de toda tela há o seletor de período. **Mensal** mostra um mês;
 **Anual** agrega o ano: receitas, gastos e dividendos somam os doze meses.
 
+Abaixo do seletor uma linha diz onde você está (*"setembro/2026 — mês
+atual"*, *"agosto/2026 — mês passado"*) e, quando você sai do mês corrente,
+aparece o botão **Voltar para hoje**. Cada troca também mostra um aviso
+rápido no canto.
+
 Patrimônio é a exceção e **não soma**: no modo anual ele mostra a posição
 mais recente informada naquele ano, com o mês da foto ao lado
 (*"posição de setembro/2026"*). Somar patrimônios mensais contaria o mesmo
@@ -115,6 +120,18 @@ que já foi registrado); o caminho é desativar e criar outra.
 O total dos percentuais precisa fechar **exatamente 100%** (10.000
 pontos-base). Fora disso, o botão de salvar fica desabilitado e a tela diz
 quanto falta ou sobra.
+
+### Metas
+
+Qualquer categoria pode ter uma meta, e todas aparecem no bloco **Metas** da
+tela inicial com barra de progresso. Há duas naturezas:
+
+- **Meta com valor-alvo** (comportamento `ALLOCATION_GOAL`, como a Reserva):
+  ao chegar perto do alvo, o valor planejado é cortado e a sobra vai para a
+  categoria de destino.
+- **Meta de acompanhamento** (qualquer outro comportamento, como
+  Independência financeira): mostra o progresso e **não** mexe no rateio —
+  continuar aportando depois de bater a meta é o esperado.
 
 ## Como o aplicativo pensa
 
