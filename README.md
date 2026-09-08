@@ -212,8 +212,17 @@ direta falhar.
 
 ### 2. Levar os dados para lá
 
+Coloque a URL num arquivo `.env` na pasta do projeto (ele é ignorado pelo
+git, então a senha não vai para lugar nenhum):
+
+```
+DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/postgres
+```
+
+E rode:
+
 ```bash
-python migrar_para_nuvem.py --destino "postgresql+psycopg://..."
+python migrar_para_nuvem.py
 ```
 
 O script mostra quantas linhas existem de cada lado, cria o esquema pelas

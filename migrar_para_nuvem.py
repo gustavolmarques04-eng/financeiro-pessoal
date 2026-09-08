@@ -6,9 +6,13 @@ dependências, dentro de uma única transação: ou vai tudo, ou não vai nada.
 
 Uso::
 
+    python migrar_para_nuvem.py                     # destino vem do .env
+    python migrar_para_nuvem.py --conferir          # só compara, não copia
     python migrar_para_nuvem.py --destino "postgresql+psycopg://..."
-    python migrar_para_nuvem.py --destino "..." --sim        # sem perguntar
-    python migrar_para_nuvem.py --destino "..." --conferir   # só compara
+
+Sem ``--destino``, a URL sai de ``DATABASE_URL`` (arquivo ``.env`` ou
+segredos do Streamlit) — assim a senha do banco não precisa passar pela
+linha de comando nem ficar no histórico do terminal.
 
 O banco de origem não é alterado em momento nenhum.
 """
@@ -26,6 +30,7 @@ RAIZ = Path(__file__).resolve().parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
+from core import settings  # noqa: E402
 from core.database import DEFAULT_DB_PATH  # noqa: E402
 from core.models import (  # noqa: E402
     AllocationState,
@@ -130,7 +135,11 @@ def main() -> int:
     """Ponto de entrada do script."""
     _preparar_console()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--destino", required=True, help="URL do banco de destino")
+    parser.add_argument(
+        "--destino",
+        default=None,
+        help="URL do banco de destino (padrão: DATABASE_URL do .env)",
+    )
     parser.add_argument(
         "--origem",
         default=f"sqlite:///{DEFAULT_DB_PATH.as_posix()}",
@@ -143,6 +152,20 @@ def main() -> int:
         help="apenas compara as contagens, sem copiar nada",
     )
     args = parser.parse_args()
+
+    destino_url = args.destino or settings.database_url()
+    if not destino_url:
+        print(
+            "Nenhum destino informado.\n"
+            "Crie um arquivo .env na pasta do projeto com a linha:\n"
+            "  DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/postgres\n"
+            "ou passe --destino na linha de comando."
+        )
+        return 1
+    if destino_url == args.origem:
+        print("Origem e destino são o mesmo banco. Nada a fazer.")
+        return 1
+    args.destino = destino_url
 
     origem = create_engine(args.origem)
     try:
