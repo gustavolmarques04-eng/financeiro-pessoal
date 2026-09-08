@@ -225,12 +225,55 @@ def _anos_disponiveis(selecionado: int) -> list[int]:
     return list(range(min(referencias) - 1, max(referencias) + 3))
 
 
+ANUNCIO_KEY = "_periodo_anunciado"
+
+
+def _rotulo_relativo(periodo: Period) -> str:
+    """Diz onde o período está em relação a hoje, em palavras."""
+    hoje = month_start(date.today())
+    if periodo.is_year:
+        diferenca = periodo.year - hoje.year
+        if diferenca == 0:
+            return "ano atual"
+        return f"{abs(diferenca)} ano(s) {'atrás' if diferenca < 0 else 'à frente'}"
+
+    diferenca = (periodo.month.year - hoje.year) * 12 + (periodo.month.month - hoje.month)
+    if diferenca == 0:
+        return "mês atual"
+    if diferenca == -1:
+        return "mês passado"
+    if diferenca == 1:
+        return "mês que vem"
+    return f"{abs(diferenca)} meses {'atrás' if diferenca < 0 else 'à frente'}"
+
+
+def _anunciar_periodo(periodo: Period) -> None:
+    """Avisa qual período está em foco, ao abrir e a cada troca.
+
+    O aviso só aparece quando o período realmente muda — trocar de página
+    não dispara nada.
+    """
+    anterior = st.session_state.get(ANUNCIO_KEY)
+    if anterior == periodo:
+        return
+
+    st.session_state[ANUNCIO_KEY] = periodo
+    if anterior is None:
+        st.toast(f"Mostrando {periodo.label} — {_rotulo_relativo(periodo)}", icon="📅")
+    else:
+        st.toast(f"Período alterado para {periodo.label}", icon="📅")
+
+
 def seletor_periodo(chave: str, *, permitir_anual: bool = True) -> Period:
     """Seletor global de período: modo mensal/anual e navegação ← →.
 
     Componente único — nenhuma página reimplementa esta lógica. Páginas que
     só fazem sentido no mês (Receitas, Gastos, Fechamento) passam
     ``permitir_anual=False`` e recebem sempre um período mensal.
+
+    As chaves dos widgets carregam o período vigente de propósito: com uma
+    chave fixa, o Streamlit preservaria o valor antigo do seletor e desfaria
+    a navegação feita pelas setas.
     """
     periodo = periodo_atual()
 
@@ -239,7 +282,7 @@ def seletor_periodo(chave: str, *, permitir_anual: bool = True) -> Period:
             "Modo",
             options=["Mensal", "Anual"],
             default="Mensal" if periodo.is_month else "Anual",
-            key=f"{chave}_modo",
+            key=f"{chave}_modo_{periodo.mode.value}",
             label_visibility="collapsed",
         )
         if modo == "Mensal" and periodo.is_year:
@@ -248,7 +291,6 @@ def seletor_periodo(chave: str, *, permitir_anual: bool = True) -> Period:
         if modo == "Anual" and periodo.is_month:
             definir_periodo(periodo.as_year())
             st.rerun()
-        periodo = periodo_atual()
     elif periodo.is_year:
         # A página não trabalha por ano: mantém o mesmo ano, no modo mensal.
         definir_periodo(periodo.as_month())
@@ -258,45 +300,66 @@ def seletor_periodo(chave: str, *, permitir_anual: bool = True) -> Period:
         esquerda, centro, direita = st.columns([1, 4, 1])
 
         with esquerda:
-            if st.button("←", key=f"{chave}_ant", use_container_width=True):
+            if st.button(
+                "←", key=f"{chave}_ant", use_container_width=True, help="Período anterior"
+            ):
                 definir_periodo(periodo.shift(-1))
                 st.rerun()
 
         with centro:
             if periodo.is_month:
-                meses = _meses_disponiveis(periodo.month)
-                if periodo.month not in meses:
-                    meses = sorted({*meses, periodo.month})
-                escolhido = st.selectbox(
-                    "Período",
-                    options=meses,
-                    index=meses.index(periodo.month),
-                    format_func=month_label,
-                    key=f"{chave}_mes",
-                    label_visibility="collapsed",
-                )
-                novo = Period.of_month(escolhido)
+                opcoes = _meses_disponiveis(periodo.month)
+                if periodo.month not in opcoes:
+                    opcoes = sorted({*opcoes, periodo.month})
+                atual, formatar = periodo.month, month_label
             else:
-                anos = _anos_disponiveis(periodo.year)
-                escolhido = st.selectbox(
-                    "Período",
-                    options=anos,
-                    index=anos.index(periodo.year),
-                    format_func=str,
-                    key=f"{chave}_ano",
-                    label_visibility="collapsed",
-                )
-                novo = Period.of_year(escolhido)
+                opcoes = _anos_disponiveis(periodo.year)
+                atual, formatar = periodo.year, str
+
+            escolhido = st.selectbox(
+                "Período",
+                options=opcoes,
+                index=opcoes.index(atual),
+                format_func=formatar,
+                key=f"{chave}_sel_{periodo.mode.value}_{periodo.anchor:%Y%m}",
+                label_visibility="collapsed",
+            )
 
         with direita:
-            if st.button("→", key=f"{chave}_prox", use_container_width=True):
+            if st.button(
+                "→", key=f"{chave}_prox", use_container_width=True, help="Período seguinte"
+            ):
                 definir_periodo(periodo.shift(1))
                 st.rerun()
 
-    if novo != periodo:
-        definir_periodo(novo)
+    if escolhido != atual:
+        definir_periodo(
+            Period.of_month(escolhido) if periodo.is_month else Period.of_year(escolhido)
+        )
         st.rerun()
+
+    _anunciar_periodo(periodo)
+    _indicador_periodo(chave, periodo)
     return periodo
+
+
+def _indicador_periodo(chave: str, periodo: Period) -> None:
+    """Mostra o período em foco e oferece a volta para hoje."""
+    relativo = _rotulo_relativo(periodo)
+    if relativo in ("mês atual", "ano atual"):
+        st.caption(f"📅 **{periodo.label}** — {relativo}")
+        return
+
+    coluna_texto, coluna_botao = st.columns([3, 1])
+    coluna_texto.caption(f"📅 **{periodo.label}** — {relativo}")
+    if coluna_botao.button(
+        "Voltar para hoje", key=f"{chave}_hoje", use_container_width=True
+    ):
+        hoje = date.today()
+        definir_periodo(
+            Period.of_month(hoje) if periodo.is_month else Period.of_year(hoje.year)
+        )
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -313,12 +376,19 @@ def cabecalho(titulo: str, subtitulo: str = "", *, chave: str = "topo") -> None:
                 unsafe_allow_html=True,
             )
         with direita:
-            rotulo = "🙈 Ocultar" if not privacidade() else "👁 Mostrar"
+            # O ícone mostra o estado atual: olho aberto = valores à vista,
+            # olho riscado = valores escondidos. O texto diz o que o clique faz.
+            oculto = privacidade()
             if st.button(
-                rotulo,
+                "Mostrar" if oculto else "Ocultar",
+                icon=":material/visibility_off:" if oculto else ":material/visibility:",
                 key=f"{chave}_privacidade",
                 use_container_width=True,
-                help="Esconde todos os valores em todas as telas.",
+                help=(
+                    "Voltar a exibir os valores."
+                    if oculto
+                    else "Esconde todos os valores em todas as telas."
+                ),
             ):
                 alternar_privacidade()
                 st.rerun()
@@ -380,4 +450,7 @@ def aviso_vazio(texto: str) -> None:
 
 def aviso_valores_ocultos() -> None:
     """Substitui um gráfico monetário quando o modo privado está ligado."""
-    st.info("Valores ocultos. Toque em 👁 Mostrar para ver o gráfico.", icon="🙈")
+    st.info(
+        "Valores ocultos. Toque em **Mostrar**, no topo, para ver o gráfico.",
+        icon=":material/visibility_off:",
+    )

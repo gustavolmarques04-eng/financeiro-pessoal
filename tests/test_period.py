@@ -235,3 +235,24 @@ def test_orcamento_mensal_no_modo_anual_nao_fica_zerado(
 
     assert referencia == SETEMBRO
     assert namorada.orcamento_cents == to_cents(206.65)
+
+
+def test_patrimonio_avisa_quando_o_fechamento_e_de_outro_mes(
+    session: Session, cats
+) -> None:
+    """Navegar para um mês sem fechamento não finge que a foto é dele."""
+    repo.set_opening_balance(session, cats["compras"], 0)
+    repo.upsert_closing(
+        session, SETEMBRO, reserva_cents=to_cents(1000),
+        investimentos_cents=0, dividendos_cents=0,
+    )
+
+    em_setembro = budget.get_patrimonio(session, mes(SETEMBRO))
+    assert em_setembro.fechamento_em == SETEMBRO
+    assert em_setembro.fechamento_desatualizado is False
+
+    em_novembro = budget.get_patrimonio(session, mes(date(2026, 11, 1)))
+    assert em_novembro.posicao == date(2026, 11, 1)
+    assert em_novembro.fechamento_em == SETEMBRO
+    assert em_novembro.fechamento_desatualizado is True
+    assert em_novembro.valor_de("reserva") == to_cents(1000)

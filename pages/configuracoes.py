@@ -161,39 +161,53 @@ with st.expander("✏️ Editar uma categoria"):
     if tem_hist and novo_comportamento is not escolhida.behavior:
         novo_comportamento = escolhida.behavior
 
-    meta_atual = escolhida.target_amount_cents
-    if novo_comportamento is CategoryBehavior.ALLOCATION_GOAL:
+    # Qualquer categoria pode ter meta. Só ALLOCATION_GOAL usa a meta para
+    # cortar o plano e redirecionar a sobra; nas outras é acompanhamento.
+    tem_meta = st.checkbox(
+        "Definir uma meta para esta categoria",
+        value=escolhida.target_amount_cents is not None,
+        key="edit_tem_meta",
+        help="A meta aparece no bloco Metas da tela inicial, com barra de progresso.",
+    )
+
+    meta_cents, destino_id = None, None
+    if tem_meta:
         col_c, col_d = st.columns(2)
         with col_c:
-            nova_meta = st.number_input(
+            valor_meta = st.number_input(
                 "Meta (R$)",
                 min_value=0.0,
                 step=500.0,
-                value=float(to_decimal(meta_atual or 0)),
+                value=float(to_decimal(escolhida.target_amount_cents or 0)),
                 key="edit_meta",
             )
+            meta_cents = to_cents(valor_meta)
         with col_d:
-            destinos = [v for v in ativas if v.id != escolhida.id]
-            indice = next(
-                (
-                    i
-                    for i, v in enumerate(destinos)
-                    if v.id == escolhida.overflow_target_category_id
-                ),
-                0,
-            )
-            destino = st.selectbox(
-                "Sobra vai para",
-                options=destinos,
-                index=indice if destinos else None,
-                format_func=lambda v: v.label,
-                key="edit_overflow",
-                help="Quando a meta é atingida, o percentual restante vai para cá.",
-            )
-        meta_cents = to_cents(nova_meta)
-        destino_id = destino.id if destino else None
-    else:
-        meta_cents, destino_id = None, None
+            if novo_comportamento is CategoryBehavior.ALLOCATION_GOAL:
+                destinos = [v for v in ativas if v.id != escolhida.id]
+                indice = next(
+                    (
+                        i
+                        for i, v in enumerate(destinos)
+                        if v.id == escolhida.overflow_target_category_id
+                    ),
+                    0,
+                )
+                destino = st.selectbox(
+                    "Sobra vai para",
+                    options=destinos,
+                    index=indice if destinos else None,
+                    format_func=lambda v: v.label,
+                    key="edit_overflow",
+                    help="Quando a meta é atingida, o percentual restante vai para cá.",
+                )
+                destino_id = destino.id if destino else None
+            else:
+                st.caption(
+                    "Meta de acompanhamento: mostra o progresso sem alterar o "
+                    "rateio. Para que a sobra seja redirecionada ao atingir a "
+                    "meta, o comportamento precisa ser “Meta com valor-alvo”."
+                )
 
     col_e, col_f = st.columns(2)
     with col_e:

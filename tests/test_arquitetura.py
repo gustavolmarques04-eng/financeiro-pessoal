@@ -153,3 +153,29 @@ def test_resumo_de_separacoes_tem_uma_implementacao() -> None:
     assert "resumo_separacoes" in separacoes
     for codigo in (home, separacoes):
         assert "falta_cents=" not in codigo, "a página está montando o resumo na mão"
+
+
+# --------------------------------------------------------------------------
+# Navegação por período: as setas precisam realmente mudar o mês
+# --------------------------------------------------------------------------
+def test_seletor_de_periodo_recria_o_widget_a_cada_periodo() -> None:
+    """A chave do seletor carrega o período vigente.
+
+    Com uma chave fixa o Streamlit preserva o valor antigo do ``selectbox``,
+    ignora o ``index`` e desfaz a navegação feita pelas setas — o seletor
+    voltava sozinho para o mês anterior.
+    """
+    codigo = (RAIZ / "ui" / "shared.py").read_text(encoding="utf-8")
+    trecho = codigo[codigo.index("def seletor_periodo("):]
+
+    assert 'key=f"{chave}_sel_{periodo.mode.value}_{periodo.anchor:%Y%m}"' in trecho
+    assert 'key=f"{chave}_modo_{periodo.mode.value}"' in trecho
+
+
+def test_troca_de_periodo_e_anunciada() -> None:
+    """Abrir o app e trocar de período avisam o usuário."""
+    codigo = (RAIZ / "ui" / "shared.py").read_text(encoding="utf-8")
+
+    assert "_anunciar_periodo" in codigo
+    assert "Mostrando {periodo.label}" in codigo
+    assert "Período alterado para {periodo.label}" in codigo

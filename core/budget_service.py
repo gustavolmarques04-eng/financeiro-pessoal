@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 from . import categories as cat
 from . import repositories as repo
 from .categories import CategoryView
-from .models import ClosingField
+from .models import CategoryBehavior, ClosingField
 from .period import Period
 from .utils import month_start, split_proportionally
 
@@ -120,6 +120,15 @@ class MetaLinha:
     atual_cents: int
     meta_cents: int
     informado: bool
+
+    @property
+    def limita_o_plano(self) -> bool:
+        """Se atingir a meta reduz o valor planejado e redireciona a sobra.
+
+        Só vale para ``ALLOCATION_GOAL``. Nas demais categorias a meta é de
+        acompanhamento: mostra o progresso sem mexer no rateio.
+        """
+        return self.categoria.behavior is CategoryBehavior.ALLOCATION_GOAL
 
     @property
     def falta_cents(self) -> int:
@@ -229,11 +238,17 @@ def aplicar_regras_de_meta(
 
     A regra vale para qualquer categoria ``ALLOCATION_GOAL`` com valor-alvo
     — não existe nenhuma referência a "Reserva" aqui.
+
+    Outros comportamentos podem ter meta também, mas só para acompanhar o
+    progresso: nesses casos o plano não é cortado, porque continuar
+    aportando depois de bater a meta é o comportamento desejado.
     """
     ajustado = dict(planejado)
     sobra_total = 0
 
     for vista in vistas:
+        if vista.behavior is not CategoryBehavior.ALLOCATION_GOAL:
+            continue
         if vista.target_amount_cents is None or not vista.active:
             continue
         previsto = ajustado.get(vista.id, 0)
@@ -468,7 +483,12 @@ def envelopes(session: Session, period: Period) -> list[EnvelopeLinha]:
 
 
 def metas(session: Session, period: Period) -> list[MetaLinha]:
-    """Progresso das categorias com valor-alvo no fim do período."""
+    """Progresso de todas as categorias com valor-alvo no fim do período.
+
+    Qualquer categoria pode ter meta — Independência, Viagem, Compras — e
+    todas aparecem no mesmo bloco. O que muda entre elas é se a meta corta o
+    plano (:attr:`MetaLinha.limita_o_plano`) ou é só acompanhamento.
+    """
     fim = period.end
     linhas = []
     for vista in cat.resolve_active(session, fim):
@@ -511,6 +531,14 @@ class Patrimonio:
     posicao: date
     parcelas: list[ParcelaPatrimonio]
     informado: bool
+    #: Mês do fechamento usado. Pode ser anterior a ``posicao`` quando o mês
+    #: em foco ainda não foi fechado — o rótulo da tela precisa dizer isso.
+    fechamento_em: date | None = None
+
+    @property
+    def fechamento_desatualizado(self) -> bool:
+        """Se reserva e investimentos vêm de um mês anterior ao exibido."""
+        return self.fechamento_em is not None and self.fechamento_em != self.posicao
 
     @property
     def total_cents(self) -> int:
@@ -547,7 +575,12 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
         ParcelaPatrimonio(categoria=v, valor_cents=saldo_categoria(session, v, posicao))
         for v in vistas
     ]
-    return Patrimonio(posicao=posicao, parcelas=parcelas, informado=fechamento is not None)
+    return Patrimonio(
+        posicao=posicao,
+        parcelas=parcelas,
+        informado=fechamento is not None,
+        fechamento_em=fechamento.month if fechamento else None,
+    )
 
 
 def serie_patrimonio(session: Session, meses: list[date]) -> list[tuple[date, int]]:

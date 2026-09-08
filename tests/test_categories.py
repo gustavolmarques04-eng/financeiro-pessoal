@@ -326,3 +326,100 @@ def test_criar_categoria_gera_slug_unico(session: Session) -> None:
     assert a.slug == "pet"
     assert b.slug == "pet_2"
     assert a.id != b.id
+
+
+# --------------------------------------------------------------------------
+# Metas em qualquer categoria
+# --------------------------------------------------------------------------
+def test_qualquer_categoria_pode_ter_meta(session: Session, receita, cats) -> None:
+    """Uma meta em Independência aparece no bloco Metas junto da Reserva."""
+    from core.period import Period
+
+    receita(2952.21, mes=SETEMBRO)
+    cat.upsert_version(
+        session, cats["independencia"], SETEMBRO, target_amount_cents=to_cents(50_000)
+    )
+
+    linhas = budget.metas(session, Period.of_month(SETEMBRO))
+    slugs = {linha.categoria.slug for linha in linhas}
+
+    assert slugs == {"independencia", "reserva"}
+
+
+def test_meta_de_acompanhamento_nao_corta_o_plano(
+    session: Session, receita, cats
+) -> None:
+    """Bater a meta de uma categoria de aporte não reduz o aporte.
+
+    Só ``ALLOCATION_GOAL`` limita o planejado e redireciona a sobra —
+    continuar investindo depois de atingir a meta é o comportamento certo.
+    """
+    from core.period import Period
+
+    receita(2952.21, mes=SETEMBRO)
+    antes = budget.get_month_plan(session, SETEMBRO).planejado[cats["independencia"]]
+
+    # Meta já superada: o valor atual vem do fechamento de investimentos.
+    cat.upsert_version(
+        session, cats["independencia"], SETEMBRO, target_amount_cents=to_cents(100)
+    )
+    repo.upsert_closing(
+        session, SETEMBRO, reserva_cents=0,
+        investimentos_cents=to_cents(5000), dividendos_cents=0,
+    )
+
+    plano = budget.get_month_plan(session, SETEMBRO)
+    assert plano.planejado[cats["independencia"]] == antes
+    assert plano.sobra_meta_cents == 0
+
+    linha = next(
+        m
+        for m in budget.metas(session, Period.of_month(SETEMBRO))
+        if m.categoria.slug == "independencia"
+    )
+    assert linha.limita_o_plano is False
+    assert linha.percentual == 100.0
+
+
+def test_meta_com_valor_alvo_continua_cortando_o_plano(
+    session: Session, receita, cats
+) -> None:
+    """A Reserva, sendo ALLOCATION_GOAL, mantém o corte e o redirecionamento."""
+    from core.period import Period
+
+    receita(2000.00, mes=SETEMBRO)
+    repo.upsert_closing(
+        session, SETEMBRO, reserva_cents=to_cents(5900),
+        investimentos_cents=0, dividendos_cents=0,
+    )
+
+    plano = budget.get_month_plan(session, SETEMBRO)
+    assert plano.planejado[cats["reserva"]] == to_cents(100)
+    assert plano.sobra_meta_cents == to_cents(240)
+
+    linha = next(
+        m
+        for m in budget.metas(session, Period.of_month(SETEMBRO))
+        if m.categoria.slug == "reserva"
+    )
+    assert linha.limita_o_plano is True
+
+
+def test_remover_a_meta_volta_ao_normal(session: Session, receita, cats) -> None:
+    """Desmarcar a meta tira a categoria do bloco Metas."""
+    from core.period import Period
+
+    receita(1000.00, mes=SETEMBRO)
+    cat.upsert_version(
+        session, cats["viagem"], SETEMBRO, target_amount_cents=to_cents(6000)
+    )
+    assert any(
+        m.categoria.slug == "viagem"
+        for m in budget.metas(session, Period.of_month(SETEMBRO))
+    )
+
+    cat.upsert_version(session, cats["viagem"], SETEMBRO, target_amount_cents=None)
+    assert not any(
+        m.categoria.slug == "viagem"
+        for m in budget.metas(session, Period.of_month(SETEMBRO))
+    )

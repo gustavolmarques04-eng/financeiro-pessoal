@@ -70,11 +70,17 @@ with session_scope() as session:
 # --------------------------------------------------------------------------
 # Cards principais
 # --------------------------------------------------------------------------
-apoio_patrimonio = (
-    f"posição de {month_label(resumo.patrimonio.posicao)}"
-    if resumo.patrimonio.informado
-    else "informe o fechamento do mês"
-)
+if not resumo.patrimonio.informado:
+    apoio_patrimonio = "informe o fechamento do mês"
+elif resumo.patrimonio.fechamento_desatualizado:
+    # Envelopes acompanham o mês exibido, mas reserva e investimentos são
+    # os do último fechamento — dizer isso evita passar a impressão de que
+    # o número é uma foto do mês em foco.
+    apoio_patrimonio = (
+        f"último fechamento: {month_label(resumo.patrimonio.fechamento_em)}"
+    )
+else:
+    apoio_patrimonio = f"posição de {month_label(resumo.patrimonio.posicao)}"
 apoio_resultado = (
     percentual(resumo_inv.rentabilidade_pct) + " sobre o capital"
     if resumo_inv.rentabilidade_valida
