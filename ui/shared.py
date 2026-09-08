@@ -1,7 +1,11 @@
 """Peças de interface reutilizadas pelas páginas.
 
-Aqui só existe apresentação: seletor de mês, cartões, estilo e formatação.
-Nenhum cálculo financeiro — isso é responsabilidade dos serviços.
+Aqui só existe apresentação: seletor de período, botão de privacidade,
+cartões e estilo. Nenhum cálculo financeiro — isso é dos serviços.
+
+Duas coisas moram no ``session_state`` e valem para o app inteiro: o
+**período** selecionado e o **modo privacidade**. As páginas leem os dois
+por estas funções, nunca por chaves soltas.
 """
 
 from __future__ import annotations
@@ -11,10 +15,13 @@ from datetime import date
 import streamlit as st
 
 from core.database import init_db, session_scope
+from core.period import Period, PeriodMode
 from core.repositories import known_months
-from core.utils import add_months, format_brl, month_label, month_start
+from core.utils import add_months, month_label, month_start
+from ui.money import display_money, display_percent, money_md, money_plain
 
-MES_KEY = "mes_selecionado"
+PERIODO_KEY = "periodo"
+PRIVACIDADE_KEY = "privacidade"
 
 #: Paleta herdada da planilha original.
 NAVY = "#17324D"
@@ -25,45 +32,53 @@ CINZA = "#667085"
 
 CSS = f"""
 <style>
-  .block-container {{ padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1100px; }}
+  /* Folga suficiente para o conteúdo passar por baixo da barra de navegação. */
+  .block-container {{ padding-top: 3rem; padding-bottom: 3rem; max-width: 1100px; }}
+
+  /* Cabeçalho e botão de privacidade alinhados na mesma linha. */
+  .st-key-barra-topo div[data-testid="stHorizontalBlock"] {{ align-items: center; }}
 
   .fin-header {{
     background: {NAVY}; color: #fff; border-radius: 12px;
-    padding: 0.9rem 1.1rem; margin-bottom: 1.1rem;
+    padding: 0.8rem 1rem; margin-bottom: 0.8rem;
   }}
-  .fin-header h1 {{ font-size: 1.35rem; margin: 0; font-weight: 700; }}
-  .fin-header p {{ margin: 0.15rem 0 0; opacity: 0.85; font-size: 0.9rem; }}
+  .fin-header h1 {{ font-size: 1.3rem; margin: 0; font-weight: 700; }}
+  .fin-header p {{ margin: 0.15rem 0 0; opacity: 0.85; font-size: 0.88rem; }}
 
   .fin-card {{
     background: #fff; border: 1px solid #E4EAF1; border-radius: 12px;
-    padding: 0.85rem 1rem; height: 100%;
+    padding: 0.8rem 0.95rem; height: 100%;
     box-shadow: 0 1px 2px rgba(16,24,40,0.04);
   }}
   .fin-card .rotulo {{
-    font-size: 0.72rem; letter-spacing: .06em; text-transform: uppercase;
-    color: {CINZA}; font-weight: 700; margin-bottom: 0.25rem;
+    font-size: 0.7rem; letter-spacing: .06em; text-transform: uppercase;
+    color: {CINZA}; font-weight: 700; margin-bottom: 0.2rem;
   }}
-  .fin-card .valor {{ font-size: 1.5rem; font-weight: 700; color: {NAVY}; line-height: 1.2; }}
-  .fin-card .apoio {{ font-size: 0.78rem; color: {CINZA}; margin-top: 0.15rem; }}
+  .fin-card .valor {{ font-size: 1.45rem; font-weight: 700; color: {NAVY}; line-height: 1.2; }}
+  .fin-card .apoio {{ font-size: 0.76rem; color: {CINZA}; margin-top: 0.15rem; }}
   .fin-card.positivo .valor {{ color: {VERDE}; }}
   .fin-card.negativo .valor {{ color: {VERMELHO}; }}
 
   .fin-secao {{
     background: {NAVY}; color: #fff; border-radius: 8px;
-    padding: 0.45rem 0.8rem; font-weight: 700; font-size: 0.95rem;
-    margin: 1.4rem 0 0.7rem;
+    padding: 0.42rem 0.8rem; font-weight: 700; font-size: 0.93rem;
+    margin: 1.3rem 0 0.65rem;
+  }}
+  .fin-sub {{
+    font-size: 0.72rem; letter-spacing: .06em; text-transform: uppercase;
+    color: {CINZA}; font-weight: 700; margin: 0.7rem 0 0.35rem;
   }}
 
   .fin-linha {{
     display: flex; justify-content: space-between; align-items: baseline;
-    gap: 0.6rem; padding: 0.3rem 0; border-bottom: 1px solid #EEF3F7;
+    gap: 0.6rem; padding: 0.28rem 0; border-bottom: 1px solid #EEF3F7;
   }}
-  .fin-linha .chave {{ color: {CINZA}; font-size: 0.85rem; }}
+  .fin-linha .chave {{ color: {CINZA}; font-size: 0.84rem; }}
   .fin-linha .val {{ font-weight: 600; color: {NAVY}; }}
 
   .fin-pill {{
     display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
-    font-size: 0.72rem; font-weight: 700;
+    font-size: 0.71rem; font-weight: 700;
   }}
   .fin-pill.ok  {{ background: #E3F5EA; color: {VERDE}; }}
   .fin-pill.pend{{ background: #FDECEA; color: {VERMELHO}; }}
@@ -71,6 +86,7 @@ CSS = f"""
 
   .fin-neg {{ color: {VERMELHO}; font-weight: 700; }}
   .fin-pos {{ color: {VERDE}; font-weight: 700; }}
+  .fin-oculto {{ color: {CINZA}; font-style: italic; }}
 
   /* Toque confortável no celular */
   .stButton > button {{ min-height: 2.6rem; border-radius: 9px; }}
@@ -78,33 +94,40 @@ CSS = f"""
 
   /* Telas pequenas: colunas viram uma coluna só, sem zoom horizontal */
   @media (max-width: 640px) {{
-    .block-container {{ padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 1.2rem; }}
-    div[data-testid="stHorizontalBlock"] {{ flex-direction: column; gap: 0.5rem; }}
+    .block-container {{ padding-left: 0.75rem; padding-right: 0.75rem; padding-top: 2.6rem; }}
+    div[data-testid="stHorizontalBlock"] {{ flex-direction: column; gap: 0.45rem; }}
     div[data-testid="stColumn"] {{
       width: 100% !important; flex: 1 1 100% !important; min-width: 100% !important;
     }}
     .fin-card .valor {{ font-size: 1.35rem; }}
     .stButton > button {{ min-height: 2.9rem; font-size: 1rem; }}
 
-    /* O seletor de mês continua em uma linha só: ←  mês  → */
-    .st-key-seletor-mes div[data-testid="stHorizontalBlock"] {{
+    /* Barras que precisam continuar horizontais no celular */
+    .st-key-nav-periodo div[data-testid="stHorizontalBlock"],
+    .st-key-barra-topo div[data-testid="stHorizontalBlock"] {{
       flex-direction: row; gap: 0.4rem; align-items: center;
     }}
-    .st-key-seletor-mes div[data-testid="stColumn"] {{
+    .st-key-nav-periodo div[data-testid="stColumn"],
+    .st-key-barra-topo div[data-testid="stColumn"] {{
       width: auto !important; min-width: 0 !important;
     }}
-    .st-key-seletor-mes div[data-testid="stColumn"]:first-child,
-    .st-key-seletor-mes div[data-testid="stColumn"]:last-child {{
-      flex: 0 0 3.2rem !important;
+    .st-key-nav-periodo div[data-testid="stColumn"]:first-child,
+    .st-key-nav-periodo div[data-testid="stColumn"]:last-child {{
+      flex: 0 0 3rem !important;
     }}
-    .st-key-seletor-mes div[data-testid="stColumn"]:nth-child(2) {{
+    .st-key-nav-periodo div[data-testid="stColumn"]:nth-child(2) {{
       flex: 1 1 auto !important;
     }}
+    .st-key-barra-topo div[data-testid="stColumn"]:first-child {{ flex: 1 1 auto !important; }}
+    .st-key-barra-topo div[data-testid="stColumn"]:last-child {{ flex: 0 0 8.5rem !important; }}
   }}
 </style>
 """
 
 
+# --------------------------------------------------------------------------
+# Página
+# --------------------------------------------------------------------------
 def configurar_pagina(titulo: str) -> None:
     """Configuração comum de página: layout, ícone e estilo."""
     st.set_page_config(
@@ -116,22 +139,66 @@ def configurar_pagina(titulo: str) -> None:
 
 
 def garantir_banco() -> None:
-    """Cria o banco na primeira execução do processo."""
+    """Aplica migrações e semeia o banco na primeira execução do processo."""
     if not st.session_state.get("_db_pronto"):
         init_db()
         st.session_state["_db_pronto"] = True
 
 
+# --------------------------------------------------------------------------
+# Modo privacidade
+# --------------------------------------------------------------------------
+def privacidade() -> bool:
+    """Se o modo privacidade está ligado nesta sessão."""
+    return bool(st.session_state.get(PRIVACIDADE_KEY, False))
+
+
+def alternar_privacidade() -> None:
+    """Liga/desliga o modo privacidade."""
+    st.session_state[PRIVACIDADE_KEY] = not privacidade()
+
+
+def dinheiro(cents: int | None) -> str:
+    """Valor para markdown, já respeitando o modo privacidade."""
+    return money_md(cents, privacidade())
+
+
+def dinheiro_html(cents: int | None) -> str:
+    """Valor para HTML e tabelas, já respeitando o modo privacidade."""
+    return money_plain(cents, privacidade())
+
+
+def percentual(valor: float, casas: int = 1) -> str:
+    """Percentual — continua visível no modo privado por não revelar saldo."""
+    return display_percent(valor, privacidade(), casas)
+
+
+def valor_colorido(cents: int) -> str:
+    """Valor formatado, vermelho quando negativo e verde quando positivo."""
+    if privacidade():
+        return f'<span class="fin-oculto">{dinheiro_html(cents)}</span>'
+    classe = "fin-neg" if cents < 0 else "fin-pos"
+    return f'<span class="{classe}">{dinheiro_html(cents)}</span>'
+
+
+# --------------------------------------------------------------------------
+# Período
+# --------------------------------------------------------------------------
+def periodo_atual() -> Period:
+    """Período selecionado, compartilhado por todas as telas."""
+    if PERIODO_KEY not in st.session_state:
+        st.session_state[PERIODO_KEY] = Period.of_month(date.today())
+    return st.session_state[PERIODO_KEY]
+
+
+def definir_periodo(novo: Period) -> None:
+    """Troca o período selecionado."""
+    st.session_state[PERIODO_KEY] = novo
+
+
 def mes_atual() -> date:
-    """Mês selecionado, guardado no ``session_state`` e válido em todas as telas."""
-    if MES_KEY not in st.session_state:
-        st.session_state[MES_KEY] = month_start(date.today())
-    return st.session_state[MES_KEY]
-
-
-def definir_mes(novo: date) -> None:
-    """Troca o mês selecionado."""
-    st.session_state[MES_KEY] = month_start(novo)
+    """Mês de referência do período — usado por telas que só operam por mês."""
+    return periodo_atual().month
 
 
 def _meses_disponiveis(selecionado: date) -> list[date]:
@@ -150,75 +217,121 @@ def _meses_disponiveis(selecionado: date) -> list[date]:
     return meses
 
 
-def cabecalho(titulo: str, subtitulo: str = "") -> None:
-    """Faixa de título no topo da página."""
-    extra = f"<p>{subtitulo}</p>" if subtitulo else ""
-    st.markdown(
-        f'<div class="fin-header"><h1>{titulo}</h1>{extra}</div>',
-        unsafe_allow_html=True,
-    )
+def _anos_disponiveis(selecionado: int) -> list[int]:
+    """Anos oferecidos no seletor anual."""
+    with session_scope() as session:
+        conhecidos = [m.year for m in known_months(session)]
+    referencias = conhecidos + [selecionado, date.today().year]
+    return list(range(min(referencias) - 1, max(referencias) + 3))
 
 
-def seletor_mes(chave: str) -> date:
-    """Seletor de mês com botões ← e →. Devolve o mês escolhido.
+def seletor_periodo(chave: str, *, permitir_anual: bool = True) -> Period:
+    """Seletor global de período: modo mensal/anual e navegação ← →.
 
-    ``chave`` diferencia os widgets entre páginas; o valor em si é
-    compartilhado por todas via ``session_state``.
+    Componente único — nenhuma página reimplementa esta lógica. Páginas que
+    só fazem sentido no mês (Receitas, Gastos, Fechamento) passam
+    ``permitir_anual=False`` e recebem sempre um período mensal.
     """
-    selecionado = mes_atual()
-    meses = _meses_disponiveis(selecionado)
-    if selecionado not in meses:
-        meses.append(selecionado)
-        meses.sort()
+    periodo = periodo_atual()
 
-    # O container nomeado vira a classe .st-key-seletor-mes, usada pelo CSS
-    # para manter os três controles lado a lado também no celular.
-    with st.container(key="seletor-mes"):
+    if permitir_anual:
+        modo = st.segmented_control(
+            "Modo",
+            options=["Mensal", "Anual"],
+            default="Mensal" if periodo.is_month else "Anual",
+            key=f"{chave}_modo",
+            label_visibility="collapsed",
+        )
+        if modo == "Mensal" and periodo.is_year:
+            definir_periodo(periodo.as_month())
+            st.rerun()
+        if modo == "Anual" and periodo.is_month:
+            definir_periodo(periodo.as_year())
+            st.rerun()
+        periodo = periodo_atual()
+    elif periodo.is_year:
+        # A página não trabalha por ano: mantém o mesmo ano, no modo mensal.
+        definir_periodo(periodo.as_month())
+        periodo = periodo_atual()
+
+    with st.container(key="nav-periodo"):
         esquerda, centro, direita = st.columns([1, 4, 1])
 
         with esquerda:
-            if st.button(
-                "←", key=f"{chave}_ant", help="Mês anterior", use_container_width=True
-            ):
-                definir_mes(add_months(selecionado, -1))
+            if st.button("←", key=f"{chave}_ant", use_container_width=True):
+                definir_periodo(periodo.shift(-1))
                 st.rerun()
 
         with centro:
-            escolhido = st.selectbox(
-                "Mês analisado",
-                options=meses,
-                index=meses.index(selecionado),
-                format_func=month_label,
-                key=f"{chave}_sel",
-                label_visibility="collapsed",
-            )
+            if periodo.is_month:
+                meses = _meses_disponiveis(periodo.month)
+                if periodo.month not in meses:
+                    meses = sorted({*meses, periodo.month})
+                escolhido = st.selectbox(
+                    "Período",
+                    options=meses,
+                    index=meses.index(periodo.month),
+                    format_func=month_label,
+                    key=f"{chave}_mes",
+                    label_visibility="collapsed",
+                )
+                novo = Period.of_month(escolhido)
+            else:
+                anos = _anos_disponiveis(periodo.year)
+                escolhido = st.selectbox(
+                    "Período",
+                    options=anos,
+                    index=anos.index(periodo.year),
+                    format_func=str,
+                    key=f"{chave}_ano",
+                    label_visibility="collapsed",
+                )
+                novo = Period.of_year(escolhido)
 
         with direita:
-            if st.button(
-                "→", key=f"{chave}_prox", help="Mês seguinte", use_container_width=True
-            ):
-                definir_mes(add_months(selecionado, 1))
+            if st.button("→", key=f"{chave}_prox", use_container_width=True):
+                definir_periodo(periodo.shift(1))
                 st.rerun()
 
-    if escolhido != selecionado:
-        definir_mes(escolhido)
+    if novo != periodo:
+        definir_periodo(novo)
         st.rerun()
-    return selecionado
+    return periodo
 
 
-def _sem_escape(texto: str) -> str:
-    """Remove o escape do cifrão, para uso dentro de HTML."""
-    return texto.replace(r"\$", "$")
+# --------------------------------------------------------------------------
+# Blocos visuais
+# --------------------------------------------------------------------------
+def cabecalho(titulo: str, subtitulo: str = "", *, chave: str = "topo") -> None:
+    """Faixa de título com o botão global de privacidade."""
+    with st.container(key="barra-topo"):
+        esquerda, direita = st.columns([3, 1])
+        with esquerda:
+            extra = f"<p>{subtitulo}</p>" if subtitulo else ""
+            st.markdown(
+                f'<div class="fin-header"><h1>{titulo}</h1>{extra}</div>',
+                unsafe_allow_html=True,
+            )
+        with direita:
+            rotulo = "🙈 Ocultar" if not privacidade() else "👁 Mostrar"
+            if st.button(
+                rotulo,
+                key=f"{chave}_privacidade",
+                use_container_width=True,
+                help="Esconde todos os valores em todas as telas.",
+            ):
+                alternar_privacidade()
+                st.rerun()
 
 
 def cartao(rotulo: str, valor: str, apoio: str = "", tom: str = "") -> str:
     """HTML de um cartão de indicador. ``tom`` aceita ``positivo``/``negativo``.
 
     O conteúdo vira HTML puro, onde o markdown não roda — então o escape do
-    cifrão que ``brl`` aplica é desfeito aqui.
+    cifrão é desfeito aqui.
     """
     classe = f"fin-card {tom}".strip()
-    valor, apoio = _sem_escape(valor), _sem_escape(apoio)
+    valor, apoio = valor.replace(r"\$", "$"), apoio.replace(r"\$", "$")
     linha_apoio = f'<div class="apoio">{apoio}</div>' if apoio else ""
     return (
         f'<div class="{classe}"><div class="rotulo">{rotulo}</div>'
@@ -241,20 +354,17 @@ def secao(titulo: str) -> None:
     st.markdown(f'<div class="fin-secao">{titulo}</div>', unsafe_allow_html=True)
 
 
-def brl(cents: int) -> str:
-    """Valor em reais pronto para markdown.
-
-    O Streamlit lê ``$...$`` como LaTeX, então dois "R$" no mesmo texto
-    viravam fórmula. Escapar o cifrão resolve. Use esta função em texto
-    markdown; dentro de HTML use ``format_brl``, porque lá o markdown não roda.
-    """
-    return format_brl(cents).replace("$", r"\$")
+def subtitulo(texto: str) -> None:
+    """Rótulo discreto para separar blocos dentro de uma seção."""
+    st.markdown(f'<div class="fin-sub">{texto}</div>', unsafe_allow_html=True)
 
 
-def valor_colorido(cents: int) -> str:
-    """Valor formatado, vermelho quando negativo e verde quando positivo."""
-    classe = "fin-neg" if cents < 0 else "fin-pos"
-    return f'<span class="{classe}">{format_brl(cents)}</span>'
+def linha(chave: str, valor_html: str) -> str:
+    """HTML de uma linha chave/valor."""
+    return (
+        f'<div class="fin-linha"><span class="chave">{chave}</span>'
+        f'<span class="val">{valor_html}</span></div>'
+    )
 
 
 def selo(status: str) -> str:
@@ -266,3 +376,8 @@ def selo(status: str) -> str:
 def aviso_vazio(texto: str) -> None:
     """Mensagem padrão para listas sem registros."""
     st.info(texto, icon="🗒️")
+
+
+def aviso_valores_ocultos() -> None:
+    """Substitui um gráfico monetário quando o modo privado está ligado."""
+    st.info("Valores ocultos. Toque em 👁 Mostrar para ver o gráfico.", icon="🙈")

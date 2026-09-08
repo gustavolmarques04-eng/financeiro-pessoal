@@ -11,26 +11,27 @@ from core import budget_service as budget
 from core import repositories as repo
 from core.database import session_scope
 from core.models import IncomeType
-from core.utils import format_brl, format_brl, month_label, month_start, to_cents, to_decimal
+from core.utils import month_label, month_start, to_cents, to_decimal
 from ui.shared import (
-    brl,
     aviso_vazio,
     cabecalho,
     configurar_pagina,
+    dinheiro,
+    dinheiro_html,
     garantir_banco,
     mostrar_cartoes,
     secao,
-    seletor_mes,
+    seletor_periodo,
 )
 
 configurar_pagina("Receitas")
 garantir_banco()
 
-cabecalho("💰 Receitas", "Tudo que entrou no mês selecionado.")
-mes = seletor_mes("rec")
+cabecalho("💰 Receitas", "Tudo que entrou no mês selecionado.", chave="rec")
+periodo = seletor_periodo("rec", permitir_anual=False)
+mes = periodo.month
 
 with session_scope() as session:
-    receitas = repo.list_incomes(session, mes)
     plano = budget.get_month_plan(session, mes)
     dados = [
         {
@@ -42,15 +43,15 @@ with session_scope() as session:
             "orcamento": r.counts_in_budget,
             "obs": r.note or "",
         }
-        for r in receitas
+        for r in repo.list_incomes(session, periodo)
     ]
 
 mostrar_cartoes(
     [
-        ("Recebido no mês", brl(plano.recebido_cents), "Exclui saldos iniciais", ""),
+        ("Recebido no mês", dinheiro(plano.recebido_cents), "Exclui saldos iniciais", ""),
         (
             "Base de distribuição",
-            brl(plano.base_cents),
+            dinheiro(plano.base_cents),
             "O que é rateado pelos percentuais",
             "",
         ),
@@ -66,9 +67,11 @@ secao("Adicionar receita")
 with st.form("nova_receita", clear_on_submit=True):
     coluna_a, coluna_b = st.columns(2)
     with coluna_a:
-        data = st.date_input("Data", value=max(month_start(mes), date.today())
-                             if month_start(date.today()) == mes else month_start(mes),
-                             format="DD/MM/YYYY")
+        data = st.date_input(
+            "Data",
+            value=date.today() if month_start(date.today()) == mes else mes,
+            format="DD/MM/YYYY",
+        )
         tipo = st.selectbox(
             "Tipo", options=IncomeType.selecionaveis(), format_func=lambda t: t.value
         )
@@ -102,8 +105,8 @@ if enviado:
                 note=observacao.strip() or None,
             )
         st.success(
-            f"Receita adicionada. O plano de {month_label(month_start(data))} foi recalculado "
-            "e as separações afetadas voltaram a ficar pendentes."
+            f"Receita adicionada. O plano de {month_label(month_start(data))} foi "
+            "recalculado e as separações afetadas voltaram a ficar pendentes."
         )
         st.rerun()
 
@@ -122,16 +125,14 @@ else:
                 "Data": d["data"].strftime("%d/%m"),
                 "Descrição": d["descricao"],
                 "Tipo": d["tipo"].value,
-                "Valor": format_brl(d["valor_cents"]),
+                "Valor": dinheiro_html(d["valor_cents"]),
                 "No rateio": "Sim" if d["orcamento"] else "Não",
             }
             for d in dados
         ]
     )
     st.dataframe(tabela, use_container_width=True, hide_index=True)
-    st.markdown(
-        f"**Total do mês:** {brl(sum(d['valor_cents'] for d in dados))}"
-    )
+    st.markdown(f"**Total do mês:** {dinheiro(sum(d['valor_cents'] for d in dados))}")
 
     # ----------------------------------------------------------------------
     # Editar / excluir
@@ -139,7 +140,7 @@ else:
     with st.expander("Editar ou excluir uma receita"):
         rotulos = {
             d["id"]: f"{d['data'].strftime('%d/%m')} · {d['descricao']} · "
-                     f"{brl(d['valor_cents'])}"
+                     f"{dinheiro_html(d['valor_cents'])}"
             for d in dados
         }
         escolhido = st.selectbox(
@@ -150,9 +151,7 @@ else:
         with st.form(f"editar_receita_{escolhido}"):
             col_a, col_b = st.columns(2)
             with col_a:
-                nova_data = st.date_input(
-                    "Data", value=atual["data"], format="DD/MM/YYYY"
-                )
+                nova_data = st.date_input("Data", value=atual["data"], format="DD/MM/YYYY")
                 novo_tipo = st.selectbox(
                     "Tipo",
                     options=IncomeType.selecionaveis(),
@@ -174,9 +173,7 @@ else:
 
             botao_a, botao_b = st.columns(2)
             salvar = botao_a.form_submit_button("Salvar", use_container_width=True)
-            excluir = botao_b.form_submit_button(
-                "Excluir", use_container_width=True, type="secondary"
-            )
+            excluir = botao_b.form_submit_button("Excluir", use_container_width=True)
 
         if salvar:
             if not nova_descricao.strip():

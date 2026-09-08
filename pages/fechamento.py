@@ -9,23 +9,31 @@ from core import budget_service as budget
 from core import investment_service as investimentos
 from core import repositories as repo
 from core.database import session_scope
-from core.utils import format_brl, format_brl, month_label, to_cents, to_decimal
+from core.models import ClosingField
+from core.utils import month_label, to_cents, to_decimal
 from ui.shared import (
-    brl,
     aviso_vazio,
     cabecalho,
     configurar_pagina,
+    dinheiro,
+    dinheiro_html,
     garantir_banco,
     mostrar_cartoes,
+    percentual,
     secao,
-    seletor_mes,
+    seletor_periodo,
 )
 
 configurar_pagina("Fechamento mensal")
 garantir_banco()
 
-cabecalho("📅 Fechamento mensal", "Uma vez por mês: reserva, investimentos e dividendos.")
-mes = seletor_mes("fech")
+cabecalho(
+    "📅 Fechamento mensal",
+    "Uma vez por mês: reserva, investimentos e dividendos.",
+    chave="fech",
+)
+periodo = seletor_periodo("fech", permitir_anual=False)
+mes = periodo.month
 
 with session_scope() as session:
     fechamento = repo.get_closing(session, mes)
@@ -39,15 +47,15 @@ with session_scope() as session:
         if fechamento
         else None
     )
-    patrimonio = budget.get_patrimonio(session, mes)
-    resumo_inv = investimentos.get_resumo(session, mes)
+    rotulos = budget.rotulos_do_fechamento(session, mes)
+    patrimonio = budget.get_patrimonio(session, periodo)
+    resumo_inv = investimentos.get_resumo(session, periodo)
     historico = [
         {
             "mes": f.month,
             "reserva": f.reserva_cents,
             "investimentos": f.investimentos_cents,
             "dividendos": f.dividendos_cents,
-            "obs": f.note or "",
         }
         for f in repo.list_closings(session)
     ]
@@ -57,11 +65,16 @@ if atual is None:
 else:
     mostrar_cartoes(
         [
-            ("Reserva", brl(atual["reserva"]), "Informado por você", ""),
-            ("Investimentos", brl(atual["investimentos"]), "Informado por você", ""),
+            (rotulos[ClosingField.RESERVA], dinheiro(atual["reserva"]), "Informado por você", ""),
+            (
+                rotulos[ClosingField.INVESTIMENTOS],
+                dinheiro(atual["investimentos"]),
+                "Informado por você",
+                "",
+            ),
             (
                 "Patrimônio acompanhado",
-                brl(patrimonio.total_cents),
+                dinheiro(patrimonio.total_cents),
                 "Reserva + investimentos + envelopes",
                 "",
             ),
@@ -79,7 +92,7 @@ with st.form("fechamento"):
     col_a, col_b = st.columns(2)
     with col_a:
         reserva = st.number_input(
-            "Reserva de emergência atual (R$)",
+            f"{rotulos[ClosingField.RESERVA]} — valor atual (R$)",
             min_value=0.0,
             step=50.0,
             value=float(to_decimal(atual["reserva"])) if atual else 0.0,
@@ -92,13 +105,15 @@ with st.form("fechamento"):
         )
     with col_b:
         invest = st.number_input(
-            "Investimentos totais (R$)",
+            f"{rotulos[ClosingField.INVESTIMENTOS]} — valor atual (R$)",
             min_value=0.0,
             step=50.0,
             value=float(to_decimal(atual["investimentos"])) if atual else 0.0,
             help="Valor atual da carteira. Só o que já foi investido de fato.",
         )
-        observacao = st.text_input("Observação (opcional)", value=atual["obs"] if atual else "")
+        observacao = st.text_input(
+            "Observação (opcional)", value=atual["obs"] if atual else ""
+        )
 
     col_c, col_d = st.columns(2)
     salvar = col_c.form_submit_button("Salvar fechamento", use_container_width=True)
@@ -124,8 +139,8 @@ if apagar:
     st.rerun()
 
 st.caption(
-    "A reserva informada aqui também alimenta a regra da meta: quando faltar menos "
-    "que o percentual para chegar à meta, a sobra vai para Independência financeira."
+    "A reserva informada aqui alimenta a regra da meta: quando faltar menos que o "
+    "percentual para chegar ao alvo, a sobra vai para a categoria de destino."
 )
 
 
@@ -137,19 +152,27 @@ mostrar_cartoes(
     [
         (
             "Capital destinado",
-            brl(resumo_inv.capital_destinado_cents),
-            "Separado para Independência até aqui",
+            dinheiro(resumo_inv.capital_destinado_cents),
+            "Separado para investir até aqui",
             "",
         ),
         (
             "Ganho/perda estimado",
-            brl(resumo_inv.resultado_cents),
-            f"{resumo_inv.rentabilidade_pct:+.1f}% sobre o capital",
-            "negativo" if resumo_inv.resultado_cents < 0 else "positivo",
+            dinheiro(resumo_inv.resultado_cents)
+            if resumo_inv.informado
+            else "Não informado",
+            percentual(resumo_inv.rentabilidade_pct) + " sobre o capital"
+            if resumo_inv.rentabilidade_valida
+            else "aguardando o valor da carteira",
+            ("negativo" if resumo_inv.resultado_cents < 0 else "positivo")
+            if resumo_inv.informado
+            else "",
         ),
     ]
 )
-st.caption("Dividendos não entram nesta conta, para não contar o mesmo dinheiro duas vezes.")
+st.caption(
+    "Dividendos não entram nesta conta, para não contar o mesmo dinheiro duas vezes."
+)
 
 
 # --------------------------------------------------------------------------
@@ -164,9 +187,9 @@ else:
             [
                 {
                     "Mês": month_label(h["mes"]),
-                    "Reserva": format_brl(h["reserva"]),
-                    "Investimentos": format_brl(h["investimentos"]),
-                    "Dividendos": format_brl(h["dividendos"]),
+                    rotulos[ClosingField.RESERVA]: dinheiro_html(h["reserva"]),
+                    rotulos[ClosingField.INVESTIMENTOS]: dinheiro_html(h["investimentos"]),
+                    "Dividendos": dinheiro_html(h["dividendos"]),
                 }
                 for h in reversed(historico)
             ]
@@ -174,4 +197,4 @@ else:
         use_container_width=True,
         hide_index=True,
     )
-    st.caption("Cada mês guarda o que foi informado naquele mês — nada é sobrescrito depois.")
+    st.caption("Cada mês guarda o que foi informado nele — nada é sobrescrito depois.")

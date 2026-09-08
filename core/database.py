@@ -7,9 +7,10 @@ Todo o acesso ao banco passa por aqui. Trocar SQLite por PostgreSQL/Supabase
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,26 +18,14 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Category, OpeningBalance, SettingsVersion
+from .categories import seed_categories
+from .models import Base
 
 load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_DB_PATH = DATA_DIR / "financeiro.db"
-
-#: Percentuais aplicados na primeira execução (somam 100%).
-DEFAULT_PERCENTUAIS_BP: dict[Category, int] = {
-    Category.INDEPENDENCIA: 4900,
-    Category.RESERVA: 1700,
-    Category.VIAGEM: 1400,
-    Category.COMPRAS: 900,
-    Category.NAMORADA: 700,
-    Category.AMIGOS: 300,
-    Category.LIVRE: 100,
-}
-DEFAULT_META_RESERVA_CENTS = 600_000
-DEFAULT_EFFECTIVE_MONTH = date(2000, 1, 1)
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
@@ -110,32 +99,64 @@ def session_scope() -> Iterator[Session]:
 
 
 def seed_defaults(session: Session) -> None:
-    """Garante configuração inicial e saldos de envelope zerados."""
-    existe = session.scalar(select(SettingsVersion).limit(1))
-    if existe is None:
-        session.add(
-            SettingsVersion(
-                effective_month=DEFAULT_EFFECTIVE_MONTH,
-                meta_reserva_cents=DEFAULT_META_RESERVA_CENTS,
-                pct_independencia_bp=DEFAULT_PERCENTUAIS_BP[Category.INDEPENDENCIA],
-                pct_reserva_bp=DEFAULT_PERCENTUAIS_BP[Category.RESERVA],
-                pct_viagem_bp=DEFAULT_PERCENTUAIS_BP[Category.VIAGEM],
-                pct_compras_bp=DEFAULT_PERCENTUAIS_BP[Category.COMPRAS],
-                pct_namorada_bp=DEFAULT_PERCENTUAIS_BP[Category.NAMORADA],
-                pct_amigos_bp=DEFAULT_PERCENTUAIS_BP[Category.AMIGOS],
-                pct_livre_bp=DEFAULT_PERCENTUAIS_BP[Category.LIVRE],
-            )
-        )
+    """Garante as categorias iniciais na primeira execução."""
+    seed_categories(session)
 
-    for categoria in (Category.VIAGEM, Category.COMPRAS):
-        if session.get(OpeningBalance, categoria) is None:
-            session.add(OpeningBalance(category=categoria, amount_cents=0))
+
+def sqlite_file() -> Path | None:
+    """Arquivo SQLite em uso, ou ``None`` quando o banco não é SQLite."""
+    url = database_url()
+    if not url.startswith("sqlite"):
+        return None
+    caminho = url.split("///", 1)[-1]
+    return Path(caminho) if caminho else DEFAULT_DB_PATH
+
+
+def _backup_antes_da_migracao() -> Path | None:
+    """Copia o banco SQLite antes de aplicar migrações pendentes."""
+    origem = sqlite_file()
+    if origem is None or not origem.exists():
+        return None
+    destino_dir = DATA_DIR / "backups"
+    destino_dir.mkdir(parents=True, exist_ok=True)
+    carimbo = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destino = destino_dir / f"pre_migracao_{carimbo}.db"
+    shutil.copy2(origem, destino)
+    return destino
+
+
+def run_migrations(engine: Engine | None = None) -> None:
+    """Leva o banco até a última migração do Alembic.
+
+    Faz um backup automático antes, quando há algo a aplicar. Nunca apaga e
+    recria: o esquema é transformado no lugar.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    eng = engine or get_engine()
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", database_url())
+    config.attributes["connection"] = None
+
+    with eng.connect() as conexao:
+        atual = MigrationContext.configure(conexao).get_current_revision()
+    topo = ScriptDirectory.from_config(config).get_current_head()
+
+    if atual == topo:
+        return
+    _backup_antes_da_migracao()
+    command.upgrade(config, "head")
 
 
 def init_db(engine: Engine | None = None) -> Engine:
-    """Cria as tabelas (se faltarem) e semeia os dados padrão."""
+    """Aplica as migrações pendentes e semeia os dados padrão."""
     eng = engine or get_engine()
-    Base.metadata.create_all(eng)
+    run_migrations(eng)
+    Base.metadata.create_all(eng, checkfirst=True)
     factory = sessionmaker(bind=eng, expire_on_commit=False)
     with factory() as session:
         seed_defaults(session)

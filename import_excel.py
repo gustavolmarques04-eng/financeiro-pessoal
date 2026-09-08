@@ -1,15 +1,22 @@
 """Importa uma vez os dados da planilha ``Plano_Financeiro_Pessoal_v2.xlsx``.
 
-O script lê a planilha, mostra tudo que encontrou, aponta divergências e só
-grava depois de confirmação. Rodando de novo, ele avisa que a importação já
-foi feita e não duplica nada.
+O script lê a planilha, mostra tudo que encontrou e só grava depois de
+confirmação. Rodando de novo, ele avisa que a importação já foi feita e não
+duplica nada.
+
+Uma decisão já está tomada e não é mais perguntada: o **saldo anterior do
+Nubank (R$ 5,54) não entra na base de distribuição** — ele é o saldo inicial
+do envelope Compras pessoais. Portanto::
+
+    Recebido real          R$ 2.475,94
+    Base da distribuição   R$ 2.952,21
+    Saldo inicial Compras  R$     5,54
 
 Uso::
 
-    python import_excel.py                 # interativo
-    python import_excel.py --sim           # sem perguntar
-    python import_excel.py --fonte informado
-    python import_excel.py --refazer       # apaga a marca e importa de novo
+    python import_excel.py          # interativo
+    python import_excel.py --sim    # sem perguntar
+    python import_excel.py --refazer
 """
 
 from __future__ import annotations
@@ -29,32 +36,25 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from core import budget_service as budget  # noqa: E402
+from core import categories as cat  # noqa: E402
 from core import repositories as repo  # noqa: E402
 from core.database import init_db, session_scope  # noqa: E402
-from core.models import (  # noqa: E402
-    Category,
-    ImportLog,
-    IncomeType,
-    PaymentMethod,
+from core.models import ImportLog, IncomeType, PaymentMethod  # noqa: E402
+from core.period import Period  # noqa: E402
+from core.utils import (  # noqa: E402
+    format_brl,
+    month_label,
+    month_start,
+    split_proportionally,
+    to_cents,
 )
-from core.utils import format_brl, month_label, month_start, to_cents  # noqa: E402
 
 PLANILHA_PADRAO = RAIZ.parent / "Plano_Financeiro_Pessoal_v2.xlsx"
 MARCA = "Plano_Financeiro_Pessoal_v2.xlsx"
 
-#: Estado descrito pelo usuário, usado para comparar com o arquivo.
-BASE_INFORMADA_CENTS = to_cents(2952.21)
-SALDO_COMPRAS_INFORMADO_CENTS = to_cents(5.54)
-
-CATEGORIAS_CONFIG = (
-    Category.INDEPENDENCIA,
-    Category.RESERVA,
-    Category.VIAGEM,
-    Category.COMPRAS,
-    Category.NAMORADA,
-    Category.AMIGOS,
-    Category.LIVRE,
-)
+#: Descrições cujo valor é saldo de envelope, e não base de distribuição.
+#: A chave é um trecho da descrição; o valor, o slug do envelope de destino.
+SALDOS_DE_ENVELOPE = {"nubank": "compras"}
 
 MAPA_TIPO = {
     "salário": IncomeType.SALARIO,
@@ -65,11 +65,21 @@ MAPA_TIPO = {
     "outro": IncomeType.OUTRO,
 }
 
-MAPA_CATEGORIA = {c.value.lower(): c for c in Category}
-MAPA_CATEGORIA["reserva"] = Category.RESERVA
-MAPA_CATEGORIA["independência"] = Category.INDEPENDENCIA
-
 MAPA_MEIO = {m.value.lower(): m for m in PaymentMethod}
+
+#: Ordem das categorias na aba Config da planilha.
+SLUGS_CONFIG = (
+    "independencia",
+    "reserva",
+    "viagem",
+    "compras",
+    "namorada",
+    "amigos",
+    "livre",
+)
+
+#: Categorias com checkbox no Dashboard da planilha (linhas 8 a 11).
+SLUGS_SEPARACAO = ("independencia", "reserva", "viagem", "compras")
 
 
 # --------------------------------------------------------------------------
@@ -93,7 +103,7 @@ class GastoLido:
 
     data: date
     descricao: str
-    categoria: Category
+    categoria_nome: str
     valor_cents: int
     meio: PaymentMethod
     obs: str | None
@@ -105,10 +115,11 @@ class Leitura:
 
     mes: date
     meta_reserva_cents: int
-    percentuais_bp: dict[Category, int]
+    percentuais_bp: dict[str, int]
     receitas: list[ReceitaLida] = field(default_factory=list)
     gastos: list[GastoLido] = field(default_factory=list)
-    separacoes: dict[Category, int] = field(default_factory=dict)
+    separacoes: dict[str, int] = field(default_factory=dict)
+    saldos_envelope: dict[str, int] = field(default_factory=dict)
     reserva_cents: int = 0
     investimentos_cents: int = 0
     dividendos_cents: int = 0
@@ -116,11 +127,13 @@ class Leitura:
     @property
     def recebido_cents(self) -> int:
         """Soma das receitas que não são saldo inicial."""
-        return sum(r.valor_cents for r in self.receitas if r.tipo is not IncomeType.SALDO_INICIAL)
+        return sum(
+            r.valor_cents for r in self.receitas if r.tipo is not IncomeType.SALDO_INICIAL
+        )
 
     @property
     def base_cents(self) -> int:
-        """Soma das receitas marcadas como participantes do orçamento."""
+        """Soma das receitas que entram na base de distribuição."""
         return sum(r.valor_cents for r in self.receitas if r.no_orcamento)
 
 
@@ -140,17 +153,30 @@ def _data(valor: object, padrao: date) -> date:
     return padrao
 
 
+def _envelope_de(descricao: str) -> str | None:
+    """Slug do envelope quando a descrição indica saldo de envelope."""
+    texto = descricao.lower()
+    for pista, slug in SALDOS_DE_ENVELOPE.items():
+        if pista in texto:
+            return slug
+    return None
+
+
 def ler_planilha(caminho: Path) -> Leitura:
-    """Lê a planilha simplificada de 4 abas e devolve o que encontrou."""
+    """Lê a planilha simplificada de 4 abas e devolve o que encontrou.
+
+    Aplica de uma vez a interpretação correta dos saldos de envelope: eles
+    ficam fora do rateio e viram saldo inicial da categoria correspondente.
+    """
     wb = openpyxl.load_workbook(caminho, data_only=True)
     dash, cfg = wb["Dashboard"], wb["Config"]
 
     mes = month_start(_data(dash["A4"].value, date.today()))
 
     percentuais = {}
-    for indice, categoria in enumerate(CATEGORIAS_CONFIG):
+    for indice, slug in enumerate(SLUGS_CONFIG):
         bruto = cfg.cell(6 + indice, 2).value or 0
-        percentuais[categoria] = int(round(float(bruto) * 10_000))
+        percentuais[slug] = int(round(float(bruto) * 10_000))
 
     leitura = Leitura(
         mes=mes,
@@ -167,17 +193,34 @@ def ler_planilha(caminho: Path) -> Leitura:
         valor = receitas.cell(linha, 4).value
         if not descricao or valor in (None, ""):
             continue
+
+        texto = str(descricao).strip()
         tipo_txt = str(receitas.cell(linha, 3).value or "Outro").strip().lower()
-        orcamento_txt = str(receitas.cell(linha, 5).value or "Sim").strip().lower()
+        valor_cents = _cents(valor)
+        envelope = _envelope_de(texto)
+
+        if envelope is not None:
+            # Não é renda nem base: é saldo que já existia no envelope.
+            leitura.saldos_envelope[envelope] = (
+                leitura.saldos_envelope.get(envelope, 0) + valor_cents
+            )
+            no_orcamento = False
+        else:
+            orcamento_txt = str(receitas.cell(linha, 5).value or "Sim").strip().lower()
+            no_orcamento = not orcamento_txt.startswith("n")
+
         leitura.receitas.append(
             ReceitaLida(
                 data=_data(receitas.cell(linha, 1).value, mes),
-                descricao=str(descricao).strip(),
+                descricao=texto,
                 tipo=MAPA_TIPO.get(tipo_txt, IncomeType.OUTRO),
-                valor_cents=_cents(valor),
-                no_orcamento=not orcamento_txt.startswith("n"),
-                obs=(str(receitas.cell(linha, 6).value).strip()
-                     if receitas.cell(linha, 6).value else None),
+                valor_cents=valor_cents,
+                no_orcamento=no_orcamento,
+                obs=(
+                    str(receitas.cell(linha, 6).value).strip()
+                    if receitas.cell(linha, 6).value
+                    else None
+                ),
             )
         )
 
@@ -187,28 +230,34 @@ def ler_planilha(caminho: Path) -> Leitura:
         valor = gastos.cell(linha, 4).value
         if not descricao or valor in (None, ""):
             continue
-        cat_txt = str(gastos.cell(linha, 3).value or "Outro").strip().lower()
         meio_txt = str(gastos.cell(linha, 5).value or "Outro").strip().lower()
         leitura.gastos.append(
             GastoLido(
                 data=_data(gastos.cell(linha, 1).value, mes),
                 descricao=str(descricao).strip(),
-                categoria=MAPA_CATEGORIA.get(cat_txt, Category.OUTRO),
+                categoria_nome=str(gastos.cell(linha, 3).value or "Outro").strip(),
                 valor_cents=_cents(valor),
                 meio=MAPA_MEIO.get(meio_txt, PaymentMethod.OUTRO),
-                obs=(str(gastos.cell(linha, 6).value).strip()
-                     if gastos.cell(linha, 6).value else None),
+                obs=(
+                    str(gastos.cell(linha, 6).value).strip()
+                    if gastos.cell(linha, 6).value
+                    else None
+                ),
             )
         )
 
     # Separações confirmadas no dashboard (linhas 8 a 11, coluna "Feito?").
-    for indice, categoria in enumerate(
-        (Category.INDEPENDENCIA, Category.RESERVA, Category.VIAGEM, Category.COMPRAS)
-    ):
-        linha = 8 + indice
-        marcado = "feito" in str(dash.cell(linha, 4).value or "").lower()
-        if marcado:
-            leitura.separacoes[categoria] = _cents(dash.cell(linha, 3).value)
+    # Os valores são recalculados a partir da base correta, para ficarem
+    # coerentes com o rateio que o aplicativo vai mostrar.
+    marcadas = [
+        slug
+        for indice, slug in enumerate(SLUGS_SEPARACAO)
+        if "feito" in str(dash.cell(8 + indice, 4).value or "").lower()
+    ]
+    if marcadas:
+        pesos = [percentuais[s] for s in SLUGS_CONFIG]
+        fatias = dict(zip(SLUGS_CONFIG, split_proportionally(leitura.base_cents, pesos)))
+        leitura.separacoes = {slug: fatias[slug] for slug in marcadas}
 
     return leitura
 
@@ -216,32 +265,45 @@ def ler_planilha(caminho: Path) -> Leitura:
 # --------------------------------------------------------------------------
 # Apresentação
 # --------------------------------------------------------------------------
-def mostrar(leitura: Leitura) -> bool:
-    """Imprime o que foi lido e devolve ``True`` se há divergência na base."""
+def mostrar(leitura: Leitura) -> None:
+    """Imprime tudo que foi lido, já com a interpretação aplicada."""
     print("=" * 68)
     print(f"PLANILHA LIDA — mês {month_label(leitura.mes)}")
     print("=" * 68)
 
     print("\nRECEITAS")
     for r in leitura.receitas:
-        marca = "no rateio" if r.no_orcamento else "FORA do rateio"
-        print(f"  {r.data:%d/%m/%Y}  {r.descricao:<26} {r.tipo.value:<14} "
-              f"{format_brl(r.valor_cents):>13}  ({marca})")
+        if _envelope_de(r.descricao):
+            marca = "saldo de envelope (fora do rateio)"
+        else:
+            marca = "no rateio" if r.no_orcamento else "fora do rateio"
+        print(
+            f"  {r.data:%d/%m/%Y}  {r.descricao:<26} {r.tipo.value:<14} "
+            f"{format_brl(r.valor_cents):>13}  ({marca})"
+        )
     print(f"  {'Recebido no mês':<40} {format_brl(leitura.recebido_cents):>13}")
     print(f"  {'Base de distribuição':<40} {format_brl(leitura.base_cents):>13}")
+
+    print("\nSALDOS INICIAIS DE ENVELOPE")
+    if not leitura.saldos_envelope:
+        print("  (nenhum)")
+    for slug, valor in leitura.saldos_envelope.items():
+        print(f"  {slug:<28} {format_brl(valor):>13}")
 
     print("\nGASTOS")
     if not leitura.gastos:
         print("  (nenhum)")
     for g in leitura.gastos:
-        print(f"  {g.data:%d/%m/%Y}  {g.descricao:<26} {g.categoria.value:<20} "
-              f"{format_brl(g.valor_cents):>13}")
+        print(
+            f"  {g.data:%d/%m/%Y}  {g.descricao:<26} {g.categoria_nome:<20} "
+            f"{format_brl(g.valor_cents):>13}"
+        )
 
     print("\nSEPARAÇÕES MARCADAS COMO FEITAS")
     if not leitura.separacoes:
         print("  (nenhuma)")
-    for categoria, valor in leitura.separacoes.items():
-        print(f"  {categoria.value:<28} {format_brl(valor):>13}")
+    for slug, valor in leitura.separacoes.items():
+        print(f"  {slug:<28} {format_brl(valor):>13}")
 
     print("\nFECHAMENTO")
     print(f"  {'Reserva de emergência':<28} {format_brl(leitura.reserva_cents):>13}")
@@ -251,47 +313,9 @@ def mostrar(leitura: Leitura) -> bool:
     print("\nCONFIGURAÇÃO")
     print(f"  {'Meta da reserva':<28} {format_brl(leitura.meta_reserva_cents):>13}")
     total_bp = sum(leitura.percentuais_bp.values())
-    for categoria, bp in leitura.percentuais_bp.items():
-        print(f"  {categoria.value:<28} {bp / 100:>12.2f}%")
+    for slug, bp in leitura.percentuais_bp.items():
+        print(f"  {slug:<28} {bp / 100:>12.2f}%")
     print(f"  {'TOTAL':<28} {total_bp / 100:>12.2f}%")
-
-    divergente = leitura.base_cents != BASE_INFORMADA_CENTS
-    if divergente:
-        print("\n" + "!" * 68)
-        print("DIVERGÊNCIA entre a planilha e os valores que você informou")
-        print("!" * 68)
-        print(f"  Base de distribuição na planilha : {format_brl(leitura.base_cents)}")
-        print(f"  Base que você informou           : {format_brl(BASE_INFORMADA_CENTS)}")
-        print(f"  Diferença                        : "
-              f"{format_brl(leitura.base_cents - BASE_INFORMADA_CENTS)}")
-        print()
-        print("  Causa: na planilha, 'Saldo anterior Nubank' (R$ 5,54) está marcado")
-        print("  como entrando no rateio. No seu enunciado, esses R$ 5,54 ficam de")
-        print("  fora do rateio e viram saldo inicial do envelope Compras pessoais.")
-        print()
-        print("  Escolha a fonte:")
-        print("    [arquivo]   usa a planilha como está (base "
-              f"{format_brl(leitura.base_cents)})")
-        print("    [informado] usa o que você descreveu (base "
-              f"{format_brl(BASE_INFORMADA_CENTS)}, envelope Compras R$ 5,54)")
-    return divergente
-
-
-def aplicar_fonte_informada(leitura: Leitura) -> Leitura:
-    """Ajusta a leitura para o estado descrito pelo usuário.
-
-    Tira o saldo do Nubank do rateio e recalcula as separações a partir da
-    base resultante, para que os valores fiquem coerentes entre si.
-    """
-    for receita in leitura.receitas:
-        if "nubank" in receita.descricao.lower():
-            receita.no_orcamento = False
-
-    if leitura.separacoes:
-        plano = budget.distribuir(leitura.base_cents, leitura.percentuais_bp)
-        for categoria in list(leitura.separacoes):
-            leitura.separacoes[categoria] = plano.get(categoria, 0)
-    return leitura
 
 
 # --------------------------------------------------------------------------
@@ -300,7 +324,9 @@ def aplicar_fonte_informada(leitura: Leitura) -> Leitura:
 def ja_importado() -> bool:
     """Se a planilha já foi importada alguma vez."""
     with session_scope() as session:
-        return session.scalar(select(ImportLog).where(ImportLog.source == MARCA)) is not None
+        return (
+            session.scalar(select(ImportLog).where(ImportLog.source == MARCA)) is not None
+        )
 
 
 def limpar_marca() -> None:
@@ -311,14 +337,18 @@ def limpar_marca() -> None:
             session.delete(registro)
 
 
-def importar(leitura: Leitura, *, saldo_compras_cents: int) -> None:
+def importar(leitura: Leitura) -> None:
     """Grava tudo em uma única transação."""
     with session_scope() as session:
+        ids = {v.slug: v.id for v in cat.resolve_all(session, leitura.mes)}
+
         repo.upsert_settings_version(
             session,
             effective_month=leitura.mes,
             meta_reserva_cents=leitura.meta_reserva_cents,
-            percentuais_bp=leitura.percentuais_bp,
+            percentuais_bp={
+                ids[slug]: bp for slug, bp in leitura.percentuais_bp.items() if slug in ids
+            },
         )
 
         for r in leitura.receitas:
@@ -332,22 +362,24 @@ def importar(leitura: Leitura, *, saldo_compras_cents: int) -> None:
                 note=r.obs,
             )
 
+        nomes = {v.name.lower(): v.id for v in cat.resolve_all(session, leitura.mes)}
         for g in leitura.gastos:
             repo.create_expense(
                 session,
                 purchase_date=g.data,
                 description=g.descricao,
-                category=g.categoria,
+                category_id=nomes.get(g.categoria_nome.lower(), ids["outro"]),
                 total_cents=g.valor_cents,
                 payment_method=g.meio,
                 note=g.obs,
             )
 
         revisao = repo.get_revision(session, leitura.mes)
-        for categoria, valor in leitura.separacoes.items():
-            repo.set_allocation(
-                session, leitura.mes, categoria, separated_cents=valor, revision=revisao
-            )
+        for slug, valor in leitura.separacoes.items():
+            if slug in ids:
+                repo.set_allocation(
+                    session, leitura.mes, ids[slug], separated_cents=valor, revision=revisao
+                )
 
         if any(
             (leitura.reserva_cents, leitura.investimentos_cents, leitura.dividendos_cents)
@@ -361,12 +393,11 @@ def importar(leitura: Leitura, *, saldo_compras_cents: int) -> None:
                 note="Importado da planilha",
             )
 
-        repo.set_opening_balance(
-            session,
-            Category.COMPRAS,
-            saldo_compras_cents,
-            note="Saldo trazido da planilha",
-        )
+        for slug, valor in leitura.saldos_envelope.items():
+            if slug in ids:
+                repo.set_opening_balance(
+                    session, ids[slug], valor, note="Saldo trazido da planilha"
+                )
 
         session.add(
             ImportLog(
@@ -394,12 +425,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Importa a planilha para o banco.")
     parser.add_argument("--arquivo", type=Path, default=PLANILHA_PADRAO)
     parser.add_argument("--sim", action="store_true", help="não pedir confirmação")
-    parser.add_argument(
-        "--fonte",
-        choices=("arquivo", "informado"),
-        default=None,
-        help="qual versão usar quando houver divergência",
-    )
     parser.add_argument("--refazer", action="store_true", help="permite importar de novo")
     args = parser.parse_args()
 
@@ -417,26 +442,7 @@ def main() -> int:
         return 0
 
     leitura = ler_planilha(args.arquivo)
-    divergente = mostrar(leitura)
-
-    fonte = args.fonte
-    if divergente and fonte is None:
-        if args.sim:
-            fonte = "arquivo"
-            print("\n--sim sem --fonte: usando a planilha como está.")
-        else:
-            resposta = input("\nFonte [arquivo/informado] (padrão arquivo): ").strip().lower()
-            fonte = "informado" if resposta.startswith("i") else "arquivo"
-
-    saldo_compras = 0
-    if fonte == "informado":
-        leitura = aplicar_fonte_informada(leitura)
-        saldo_compras = SALDO_COMPRAS_INFORMADO_CENTS
-        print("\nAjustado para o estado informado:")
-        print(f"  Base de distribuição   : {format_brl(leitura.base_cents)}")
-        print(f"  Envelope Compras inicia: {format_brl(saldo_compras)}")
-        for categoria, valor in leitura.separacoes.items():
-            print(f"  Separado {categoria.value:<26}: {format_brl(valor)}")
+    mostrar(leitura)
 
     if not args.sim:
         confirmacao = input("\nGravar estes dados no banco? [s/N]: ").strip().lower()
@@ -444,7 +450,7 @@ def main() -> int:
             print("Importação cancelada. Nada foi gravado.")
             return 0
 
-    importar(leitura, saldo_compras_cents=saldo_compras)
+    importar(leitura)
     print("\n✔ Importação concluída.")
 
     with session_scope() as session:
@@ -453,9 +459,16 @@ def main() -> int:
         print(f"  Recebido no mês        : {format_brl(plano.recebido_cents)}")
         print(f"  Base de distribuição   : {format_brl(plano.base_cents)}")
         for linha in plano.separacoes:
-            print(f"  {linha.categoria.value:<28} planejado "
-                  f"{format_brl(linha.planejado_cents):>13} · separado "
-                  f"{format_brl(linha.separado_cents):>13} · {linha.status}")
+            print(
+                f"  {linha.categoria.name:<28} planejado "
+                f"{format_brl(linha.planejado_cents):>13} · separado "
+                f"{format_brl(linha.separado_cents):>13} · {linha.status}"
+            )
+        for envelope in budget.envelopes(session, Period.of_month(plano.month)):
+            print(
+                f"  envelope {envelope.categoria.name:<19} saldo "
+                f"{format_brl(envelope.saldo_cents):>13}"
+            )
     return 0
 
 

@@ -73,9 +73,10 @@ def main() -> None:
 
     paginas = [
         st.Page("pages/dashboard.py", title="Início", icon="🏠", default=True),
+        st.Page("pages/separacoes.py", title="Separações", icon="🎯"),
         st.Page("pages/receitas.py", title="Receitas", icon="💰"),
         st.Page("pages/gastos.py", title="Gastos", icon="💳"),
-        st.Page("pages/fechamento.py", title="Fechamento mensal", icon="📅"),
+        st.Page("pages/fechamento.py", title="Fechamento", icon="📅"),
         st.Page("pages/configuracoes.py", title="Configurações", icon="⚙️"),
     ]
     st.navigation(paginas, position="top").run()

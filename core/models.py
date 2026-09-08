@@ -5,6 +5,11 @@ Convenções do esquema:
 * dinheiro sempre em ``Integer`` de **centavos**;
 * percentuais em **pontos-base** (``4900`` = 49,00%), para nunca usar float;
 * mês sempre gravado como ``Date`` no **primeiro dia do mês**.
+
+Categorias têm identidade estável (:class:`Category`) e propriedades
+versionadas por mês (:class:`CategoryVersion`). Nada de regra de negócio
+depende do *nome* de uma categoria: o que manda é o comportamento e as
+propriedades declaradas na versão vigente.
 """
 
 from __future__ import annotations
@@ -37,7 +42,11 @@ def _now() -> datetime:
 # Enums
 # --------------------------------------------------------------------------
 class IncomeType(str, enum.Enum):
-    """Tipos de entrada de dinheiro."""
+    """Tipos de entrada de dinheiro.
+
+    Independentes das categorias de orçamento: uma coisa é de onde o
+    dinheiro veio, outra é para onde ele vai.
+    """
 
     SALARIO = "Salário"
     VA_VR = "VA/VR"
@@ -51,46 +60,68 @@ class IncomeType(str, enum.Enum):
         return [cls.SALARIO, cls.VA_VR, cls.RENDA_EXTRA, cls.OUTRO, cls.SALDO_INICIAL]
 
 
-class Category(str, enum.Enum):
-    """Categorias do orçamento."""
+class CategoryBehavior(str, enum.Enum):
+    """O que uma categoria faz com o dinheiro.
 
-    INDEPENDENCIA = "Independência financeira"
-    RESERVA = "Reserva de emergência"
-    VIAGEM = "Viagem"
-    COMPRAS = "Compras pessoais"
-    NAMORADA = "Namorada"
-    AMIGOS = "Amigos"
-    LIVRE = "Livre"
-    OUTRO = "Outro"
+    O comportamento — e não o nome — determina as regras aplicadas.
+    """
+
+    #: Aporte de longo prazo. Exige separação; alimenta capital investido.
+    ALLOCATION_LONG_TERM = "ALLOCATION_LONG_TERM"
+    #: Meta com valor-alvo. Exige separação; a sobra vai para outra categoria.
+    ALLOCATION_GOAL = "ALLOCATION_GOAL"
+    #: Envelope que acumula entre meses. Exige separação; gastos reduzem.
+    ACCUMULATING_ENVELOPE = "ACCUMULATING_ENVELOPE"
+    #: Orçamento do mês. Não acumula; gastos reduzem o disponível.
+    MONTHLY_SPENDING = "MONTHLY_SPENDING"
+    #: Só acompanhamento: não recebe percentual nem exige separação.
+    TRACKING_ONLY = "TRACKING_ONLY"
+
+    @property
+    def requires_separation(self) -> bool:
+        """Se a categoria aparece na tela de separações com checkbox."""
+        return self in {
+            CategoryBehavior.ALLOCATION_LONG_TERM,
+            CategoryBehavior.ALLOCATION_GOAL,
+            CategoryBehavior.ACCUMULATING_ENVELOPE,
+        }
+
+    @property
+    def accumulates(self) -> bool:
+        """Se o saldo passa de um mês para o outro."""
+        return self is CategoryBehavior.ACCUMULATING_ENVELOPE
+
+    @property
+    def is_monthly_budget(self) -> bool:
+        """Se é orçamento de consumo que reinicia todo mês."""
+        return self is CategoryBehavior.MONTHLY_SPENDING
+
+    @property
+    def receives_percent(self) -> bool:
+        """Se participa do rateio da renda."""
+        return self is not CategoryBehavior.TRACKING_ONLY
+
+    @property
+    def label(self) -> str:
+        """Nome legível do comportamento."""
+        return {
+            CategoryBehavior.ALLOCATION_LONG_TERM: "Aporte de longo prazo",
+            CategoryBehavior.ALLOCATION_GOAL: "Meta com valor-alvo",
+            CategoryBehavior.ACCUMULATING_ENVELOPE: "Envelope acumulativo",
+            CategoryBehavior.MONTHLY_SPENDING: "Orçamento mensal",
+            CategoryBehavior.TRACKING_ONLY: "Somente acompanhamento",
+        }[self]
 
 
-#: Categorias em que o dinheiro é **separado** (têm checkbox no dashboard).
-SEPARACAO_CATEGORIES: tuple[Category, ...] = (
-    Category.INDEPENDENCIA,
-    Category.RESERVA,
-    Category.VIAGEM,
-    Category.COMPRAS,
-)
+class ClosingField(str, enum.Enum):
+    """Campo do fechamento mensal que informa o saldo real de uma categoria.
 
-#: Categorias de **gasto mensal** que não acumulam saldo.
-GASTO_CATEGORIES: tuple[Category, ...] = (
-    Category.NAMORADA,
-    Category.AMIGOS,
-    Category.LIVRE,
-)
+    Quando definido, o saldo da categoria vem do que o usuário declarou no
+    fechamento, e não da soma das separações.
+    """
 
-#: Categorias que funcionam como **envelope acumulativo**.
-ENVELOPE_CATEGORIES: tuple[Category, ...] = (Category.VIAGEM, Category.COMPRAS)
-
-#: Categorias disponíveis no formulário de gastos.
-EXPENSE_CATEGORIES: tuple[Category, ...] = (
-    Category.NAMORADA,
-    Category.AMIGOS,
-    Category.COMPRAS,
-    Category.VIAGEM,
-    Category.LIVRE,
-    Category.OUTRO,
-)
+    RESERVA = "reserva"
+    INVESTIMENTOS = "investimentos"
 
 
 class PaymentMethod(str, enum.Enum):
@@ -103,52 +134,86 @@ class PaymentMethod(str, enum.Enum):
 
 
 # --------------------------------------------------------------------------
-# Tabelas
+# Categorias
 # --------------------------------------------------------------------------
-class SettingsVersion(Base):
-    """Versão da configuração de percentuais, válida a partir de um mês.
+class Category(Base):
+    """Identidade estável de uma categoria.
 
-    Nunca se edita uma versão passada: cria-se outra com ``effective_month``
-    mais recente. É isso que preserva o plano histórico de cada mês.
+    Só guarda o que nunca muda. Nome, emoji, percentual e comportamento
+    ficam em :class:`CategoryVersion`, para que renomear ou reajustar não
+    reescreva o passado.
     """
 
-    __tablename__ = "settings_versions"
+    __tablename__ = "categories"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    effective_month: Mapped[date] = mapped_column(Date, unique=True, index=True)
-    meta_reserva_cents: Mapped[int] = mapped_column(Integer)
+    slug: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
-    pct_independencia_bp: Mapped[int] = mapped_column(Integer)
-    pct_reserva_bp: Mapped[int] = mapped_column(Integer)
-    pct_viagem_bp: Mapped[int] = mapped_column(Integer)
-    pct_compras_bp: Mapped[int] = mapped_column(Integer)
-    pct_namorada_bp: Mapped[int] = mapped_column(Integer)
-    pct_amigos_bp: Mapped[int] = mapped_column(Integer)
-    pct_livre_bp: Mapped[int] = mapped_column(Integer)
+    versions: Mapped[list["CategoryVersion"]] = relationship(
+        back_populates="category",
+        cascade="all, delete-orphan",
+        order_by="CategoryVersion.effective_month",
+        foreign_keys="CategoryVersion.category_id",
+    )
+
+
+class CategoryVersion(Base):
+    """Propriedades de uma categoria a partir de um mês.
+
+    Para saber como a categoria era em setembro, pega-se a versão mais
+    recente cujo ``effective_month`` seja menor ou igual a setembro.
+    """
+
+    __tablename__ = "category_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), index=True
+    )
+    effective_month: Mapped[date] = mapped_column(Date, index=True)
+
+    name: Mapped[str] = mapped_column(String(80))
+    emoji: Mapped[str | None] = mapped_column(String(8), default=None)
+    behavior: Mapped[CategoryBehavior] = mapped_column(Enum(CategoryBehavior))
+    percent_bp: Mapped[int] = mapped_column(Integer, default=0)
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(default=True)
+
+    #: Valor-alvo, usado por ``ALLOCATION_GOAL``.
+    target_amount_cents: Mapped[int | None] = mapped_column(Integer, default=None)
+    #: Para onde vai a sobra quando a meta é atingida.
+    overflow_target_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"), default=None
+    )
+    #: Se as separações desta categoria formam capital investido.
+    counts_as_investment_capital: Mapped[bool] = mapped_column(default=False)
+    #: Se o saldo desta categoria entra no patrimônio total.
+    include_in_net_worth: Mapped[bool] = mapped_column(default=False)
+    #: Campo do fechamento que informa o saldo real (em vez de calculá-lo).
+    balance_from_closing: Mapped[ClosingField | None] = mapped_column(
+        Enum(ClosingField), default=None
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
-    __table_args__ = (
-        CheckConstraint("meta_reserva_cents >= 0", name="ck_meta_reserva_nao_negativa"),
+    category: Mapped[Category] = relationship(
+        back_populates="versions", foreign_keys=[category_id]
     )
 
-    def pesos_bp(self) -> dict[Category, int]:
-        """Percentuais em pontos-base, por categoria."""
-        return {
-            Category.INDEPENDENCIA: self.pct_independencia_bp,
-            Category.RESERVA: self.pct_reserva_bp,
-            Category.VIAGEM: self.pct_viagem_bp,
-            Category.COMPRAS: self.pct_compras_bp,
-            Category.NAMORADA: self.pct_namorada_bp,
-            Category.AMIGOS: self.pct_amigos_bp,
-            Category.LIVRE: self.pct_livre_bp,
-        }
-
-    def total_bp(self) -> int:
-        """Soma dos percentuais em pontos-base (deve ser 10.000)."""
-        return sum(self.pesos_bp().values())
+    __table_args__ = (
+        UniqueConstraint("category_id", "effective_month", name="uq_versao_por_mes"),
+        CheckConstraint("percent_bp >= 0", name="ck_percentual_nao_negativo"),
+        CheckConstraint(
+            "target_amount_cents IS NULL OR target_amount_cents >= 0",
+            name="ck_meta_nao_negativa",
+        ),
+    )
 
 
+# --------------------------------------------------------------------------
+# Movimentações
+# --------------------------------------------------------------------------
 class Income(Base):
     """Uma entrada de dinheiro.
 
@@ -157,7 +222,8 @@ class Income(Base):
     * **Recebido no mês** = tudo que não é ``SALDO_INICIAL``;
     * **Base de distribuição** = tudo com ``counts_in_budget=True``.
 
-    Assim um saldo que já existia pode entrar no rateio sem virar renda.
+    Assim um saldo que já existia pode ficar registrado sem virar renda nem
+    inflar o rateio.
     """
 
     __tablename__ = "incomes"
@@ -194,7 +260,9 @@ class Expense(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     purchase_date: Mapped[date] = mapped_column(Date, index=True)
     description: Mapped[str] = mapped_column(String(200))
-    category: Mapped[Category] = mapped_column(Enum(Category), index=True)
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), index=True
+    )
     total_cents: Mapped[int] = mapped_column(Integer)
     payment_method: Mapped[PaymentMethod] = mapped_column(Enum(PaymentMethod))
     installments_count: Mapped[int] = mapped_column(Integer, default=1)
@@ -244,7 +312,7 @@ class MonthRevision(Base):
     """Contador de revisões do plano de um mês.
 
     Sobe sempre que algo muda o **plano** daquele mês (receitas ou
-    configuração). Gastos não mexem no plano e por isso não incrementam.
+    configuração de categorias). Gastos não mexem no plano.
     """
 
     __tablename__ = "month_revisions"
@@ -266,13 +334,15 @@ class AllocationState(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     month: Mapped[date] = mapped_column(Date, index=True)
-    category: Mapped[Category] = mapped_column(Enum(Category))
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), index=True
+    )
     separated_cents: Mapped[int] = mapped_column(Integer, default=0)
     confirmed_revision: Mapped[int | None] = mapped_column(Integer, default=None)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     __table_args__ = (
-        UniqueConstraint("month", "category", name="uq_separacao_mes_categoria"),
+        UniqueConstraint("month", "category_id", name="uq_separacao_mes_categoria"),
         CheckConstraint("separated_cents >= 0", name="ck_separado_nao_negativo"),
     )
 
@@ -294,13 +364,23 @@ class MonthlyClosing(Base):
         CheckConstraint("investimentos_cents >= 0", name="ck_investimentos_nao_negativos"),
     )
 
+    def valor_de(self, campo: ClosingField) -> int:
+        """Valor do campo pedido, em centavos."""
+        return (
+            self.reserva_cents
+            if campo is ClosingField.RESERVA
+            else self.investimentos_cents
+        )
+
 
 class OpeningBalance(Base):
-    """Saldo inicial de um envelope, anterior ao uso do aplicativo."""
+    """Saldo de um envelope anterior ao uso do aplicativo."""
 
     __tablename__ = "opening_balances"
 
-    category: Mapped[Category] = mapped_column(Enum(Category), primary_key=True)
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), primary_key=True
+    )
     amount_cents: Mapped[int] = mapped_column(Integer, default=0)
     note: Mapped[str | None] = mapped_column(String(300), default=None)
 
@@ -314,3 +394,94 @@ class ImportLog(Base):
     source: Mapped[str] = mapped_column(String(120), unique=True)
     detail: Mapped[str | None] = mapped_column(String(500), default=None)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+# --------------------------------------------------------------------------
+# Sementes
+# --------------------------------------------------------------------------
+#: Categorias criadas na primeira execução. Os *slugs* são estáveis; os
+#: nomes são apenas o rótulo inicial e podem ser trocados pelo usuário.
+SEED_CATEGORIES: tuple[dict[str, object], ...] = (
+    {
+        "slug": "independencia",
+        "name": "Independência financeira",
+        "emoji": "📈",
+        "behavior": CategoryBehavior.ALLOCATION_LONG_TERM,
+        "percent_bp": 4900,
+        "display_order": 1,
+        "counts_as_investment_capital": True,
+        "include_in_net_worth": True,
+        "balance_from_closing": ClosingField.INVESTIMENTOS,
+    },
+    {
+        "slug": "reserva",
+        "name": "Reserva de emergência",
+        "emoji": "🛟",
+        "behavior": CategoryBehavior.ALLOCATION_GOAL,
+        "percent_bp": 1700,
+        "display_order": 2,
+        "target_amount_cents": 600_000,
+        "overflow_target_slug": "independencia",
+        "include_in_net_worth": True,
+        "balance_from_closing": ClosingField.RESERVA,
+    },
+    {
+        "slug": "viagem",
+        "name": "Viagem",
+        "emoji": "✈️",
+        "behavior": CategoryBehavior.ACCUMULATING_ENVELOPE,
+        "percent_bp": 1400,
+        "display_order": 3,
+        "include_in_net_worth": True,
+    },
+    {
+        "slug": "compras",
+        "name": "Compras pessoais",
+        "emoji": "🛍️",
+        "behavior": CategoryBehavior.ACCUMULATING_ENVELOPE,
+        "percent_bp": 900,
+        "display_order": 4,
+        "include_in_net_worth": True,
+        "opening_balance_cents": 554,
+    },
+    {
+        "slug": "namorada",
+        "name": "Namorada",
+        "emoji": "💕",
+        "behavior": CategoryBehavior.MONTHLY_SPENDING,
+        "percent_bp": 700,
+        "display_order": 5,
+    },
+    {
+        "slug": "amigos",
+        "name": "Amigos",
+        "emoji": "🍻",
+        "behavior": CategoryBehavior.MONTHLY_SPENDING,
+        "percent_bp": 300,
+        "display_order": 6,
+    },
+    {
+        "slug": "livre",
+        "name": "Livre",
+        "emoji": "🎲",
+        "behavior": CategoryBehavior.MONTHLY_SPENDING,
+        "percent_bp": 100,
+        "display_order": 7,
+    },
+    {
+        # Destino dos gastos que não pertencem a nenhum orçamento.
+        # Não recebe percentual, então fica fora da conta dos 100%.
+        "slug": "outro",
+        "name": "Outro",
+        "emoji": "📦",
+        "behavior": CategoryBehavior.TRACKING_ONLY,
+        "percent_bp": 0,
+        "display_order": 99,
+    },
+)
+
+#: Mês em que as categorias-semente passam a valer (bem antes de qualquer dado).
+SEED_EFFECTIVE_MONTH = date(2000, 1, 1)
+
+#: Categoria usada para gastos que não se encaixam em nenhuma outra.
+FALLBACK_CATEGORY_SLUG = "outro"

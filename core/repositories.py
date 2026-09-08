@@ -1,8 +1,9 @@
 """Acesso a dados: consultas e escritas, sem nenhuma regra financeira.
 
-As regras vivem em :mod:`core.budget_service`. Aqui só há SQL/ORM. As funções
-que alteram várias tabelas (compras parceladas, versões de configuração)
-recebem a ``Session`` de fora, para participarem da transação de quem chama.
+As regras vivem em :mod:`core.budget_service` e :mod:`core.categories`.
+Aqui só há SQL/ORM. As funções que alteram várias tabelas (compras
+parceladas, versões de categoria) recebem a ``Session`` de fora, para
+participarem da transação de quem chama.
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ from datetime import date, datetime, timezone
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from . import categories as cat
 from .models import (
     AllocationState,
-    Category,
+    CategoryVersion,
     Expense,
     ExpenseInstallment,
     Income,
@@ -23,71 +25,9 @@ from .models import (
     MonthRevision,
     OpeningBalance,
     PaymentMethod,
-    SettingsVersion,
 )
+from .period import Period
 from .utils import add_months, month_start, split_installments
-
-
-# --------------------------------------------------------------------------
-# Configurações versionadas
-# --------------------------------------------------------------------------
-def get_settings_for_month(session: Session, month: date) -> SettingsVersion:
-    """Configuração vigente no mês: a mais recente com ``effective_month <= month``.
-
-    É o que preserva o histórico — mudar os percentuais hoje não reescreve o
-    plano de meses anteriores.
-    """
-    alvo = month_start(month)
-    versao = session.scalar(
-        select(SettingsVersion)
-        .where(SettingsVersion.effective_month <= alvo)
-        .order_by(SettingsVersion.effective_month.desc())
-        .limit(1)
-    )
-    if versao is None:
-        versao = session.scalar(
-            select(SettingsVersion).order_by(SettingsVersion.effective_month).limit(1)
-        )
-    if versao is None:
-        raise RuntimeError("Nenhuma configuração encontrada. Rode init_db().")
-    return versao
-
-
-def list_settings_versions(session: Session) -> list[SettingsVersion]:
-    """Todas as versões de configuração, da mais recente para a mais antiga."""
-    return list(
-        session.scalars(
-            select(SettingsVersion).order_by(SettingsVersion.effective_month.desc())
-        )
-    )
-
-
-def upsert_settings_version(
-    session: Session,
-    *,
-    effective_month: date,
-    meta_reserva_cents: int,
-    percentuais_bp: dict[Category, int],
-) -> SettingsVersion:
-    """Cria ou substitui a versão de configuração que vale a partir de um mês."""
-    alvo = month_start(effective_month)
-    versao = session.scalar(
-        select(SettingsVersion).where(SettingsVersion.effective_month == alvo)
-    )
-    if versao is None:
-        versao = SettingsVersion(effective_month=alvo, meta_reserva_cents=meta_reserva_cents)
-        session.add(versao)
-
-    versao.meta_reserva_cents = meta_reserva_cents
-    versao.pct_independencia_bp = percentuais_bp[Category.INDEPENDENCIA]
-    versao.pct_reserva_bp = percentuais_bp[Category.RESERVA]
-    versao.pct_viagem_bp = percentuais_bp[Category.VIAGEM]
-    versao.pct_compras_bp = percentuais_bp[Category.COMPRAS]
-    versao.pct_namorada_bp = percentuais_bp[Category.NAMORADA]
-    versao.pct_amigos_bp = percentuais_bp[Category.AMIGOS]
-    versao.pct_livre_bp = percentuais_bp[Category.LIVRE]
-    session.flush()
-    return versao
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +43,7 @@ def bump_revision(session: Session, month: date) -> int:
     """Incrementa a revisão do mês e devolve o novo número.
 
     Chamado sempre que o **plano** do mês muda: receita criada, alterada ou
-    excluída, e configuração que passa a valer para aquele mês.
+    excluída, e configuração de categoria que passa a valer para o mês.
     """
     alvo = month_start(month)
     registro = session.get(MonthRevision, alvo)
@@ -116,31 +56,43 @@ def bump_revision(session: Session, month: date) -> int:
     return registro.revision
 
 
-def bump_revisions_from(session: Session, month: date) -> list[date]:
-    """Sobe a revisão do mês informado e de todos os meses posteriores com dados.
-
-    Usado quando a configuração muda: só os meses afetados são invalidados.
-    """
+def months_with_data_from(session: Session, month: date) -> list[date]:
+    """Meses com dados a partir de um mês (inclusive)."""
     alvo = month_start(month)
     meses = {alvo}
     meses.update(session.scalars(select(Income.month).where(Income.month >= alvo)))
     meses.update(
         session.scalars(select(AllocationState.month).where(AllocationState.month >= alvo))
     )
-    for mes in sorted(meses):
-        bump_revision(session, mes)
+    meses.update(
+        session.scalars(
+            select(ExpenseInstallment.month).where(ExpenseInstallment.month >= alvo)
+        )
+    )
     return sorted(meses)
+
+
+def bump_revisions_from(session: Session, month: date) -> list[date]:
+    """Sobe a revisão do mês informado e dos meses posteriores com dados.
+
+    Usado quando a configuração muda: só os meses realmente afetados são
+    invalidados — nada anterior é tocado.
+    """
+    meses = months_with_data_from(session, month)
+    for mes in meses:
+        bump_revision(session, mes)
+    return meses
 
 
 # --------------------------------------------------------------------------
 # Receitas
 # --------------------------------------------------------------------------
-def list_incomes(session: Session, month: date) -> list[Income]:
-    """Receitas do mês, mais recentes primeiro."""
+def list_incomes(session: Session, period: Period) -> list[Income]:
+    """Receitas do período, mais recentes primeiro."""
     return list(
         session.scalars(
             select(Income)
-            .where(Income.month == month_start(month))
+            .where(Income.month.in_(period.months))
             .order_by(Income.date.desc(), Income.id.desc())
         )
     )
@@ -220,21 +172,38 @@ def delete_income(session: Session, income_id: int) -> None:
 
 
 def sum_incomes(
-    session: Session, month: date, *, only_budget: bool = False, only_renda: bool = False
+    session: Session,
+    period: Period,
+    *,
+    only_budget: bool = False,
+    only_renda: bool = False,
 ) -> int:
-    """Soma das receitas do mês, em centavos.
+    """Soma das receitas do período, em centavos.
 
     ``only_renda`` exclui ``Saldo inicial`` (dinheiro que já existia);
     ``only_budget`` mantém apenas o que entra na base de distribuição.
     """
     consulta = select(func.coalesce(func.sum(Income.amount_cents), 0)).where(
-        Income.month == month_start(month)
+        Income.month.in_(period.months)
     )
     if only_budget:
         consulta = consulta.where(Income.counts_in_budget.is_(True))
     if only_renda:
         consulta = consulta.where(Income.type != IncomeType.SALDO_INICIAL)
     return int(session.scalar(consulta) or 0)
+
+
+def incomes_by_month(session: Session, period: Period, *, only_renda: bool = True) -> dict[date, int]:
+    """Receita de cada mês do período, para os gráficos anuais."""
+    consulta = (
+        select(Income.month, func.sum(Income.amount_cents))
+        .where(Income.month.in_(period.months))
+        .group_by(Income.month)
+    )
+    if only_renda:
+        consulta = consulta.where(Income.type != IncomeType.SALDO_INICIAL)
+    encontrados = {mes: int(total or 0) for mes, total in session.execute(consulta)}
+    return {mes: encontrados.get(mes, 0) for mes in period.months}
 
 
 def months_with_incomes(session: Session) -> list[date]:
@@ -269,7 +238,7 @@ def create_expense(
     *,
     purchase_date: date,
     description: str,
-    category: Category,
+    category_id: int,
     total_cents: int,
     payment_method: PaymentMethod,
     installments_count: int = 1,
@@ -283,7 +252,7 @@ def create_expense(
     gasto = Expense(
         purchase_date=purchase_date,
         description=description.strip(),
-        category=category,
+        category_id=category_id,
         total_cents=total_cents,
         payment_method=payment_method,
         installments_count=installments_count,
@@ -302,7 +271,7 @@ def update_expense(
     *,
     purchase_date: date,
     description: str,
-    category: Category,
+    category_id: int,
     total_cents: int,
     payment_method: PaymentMethod,
     installments_count: int,
@@ -318,7 +287,7 @@ def update_expense(
 
     gasto.purchase_date = purchase_date
     gasto.description = description.strip()
-    gasto.category = category
+    gasto.category_id = category_id
     gasto.total_cents = total_cents
     gasto.payment_method = payment_method
     gasto.installments_count = installments_count
@@ -348,41 +317,52 @@ def get_expense(session: Session, expense_id: int) -> Expense | None:
 
 
 def list_installments(
-    session: Session, month: date, *, category: Category | None = None
+    session: Session, period: Period, *, category_id: int | None = None
 ) -> list[tuple[ExpenseInstallment, Expense]]:
-    """Parcelas que caem no mês, com a compra de origem."""
+    """Parcelas que caem no período, com a compra de origem."""
     consulta = (
         select(ExpenseInstallment, Expense)
         .join(Expense, ExpenseInstallment.expense_id == Expense.id)
-        .where(ExpenseInstallment.month == month_start(month))
+        .where(ExpenseInstallment.month.in_(period.months))
         .order_by(Expense.purchase_date.desc(), Expense.id.desc())
     )
-    if category is not None:
-        consulta = consulta.where(Expense.category == category)
+    if category_id is not None:
+        consulta = consulta.where(Expense.category_id == category_id)
     return [(parcela, gasto) for parcela, gasto in session.execute(consulta)]
 
 
 def sum_expenses(
-    session: Session, month: date, *, category: Category | None = None
+    session: Session, period: Period, *, category_id: int | None = None
 ) -> int:
-    """Total gasto no mês (somando parcelas), opcionalmente por categoria."""
+    """Total gasto no período (somando parcelas), opcionalmente por categoria."""
     consulta = (
         select(func.coalesce(func.sum(ExpenseInstallment.amount_cents), 0))
         .join(Expense, ExpenseInstallment.expense_id == Expense.id)
-        .where(ExpenseInstallment.month == month_start(month))
+        .where(ExpenseInstallment.month.in_(period.months))
     )
-    if category is not None:
-        consulta = consulta.where(Expense.category == category)
+    if category_id is not None:
+        consulta = consulta.where(Expense.category_id == category_id)
     return int(session.scalar(consulta) or 0)
 
 
-def sum_expenses_until(session: Session, month: date, category: Category) -> int:
+def expenses_by_month(session: Session, period: Period) -> dict[date, int]:
+    """Gasto de cada mês do período, para os gráficos anuais."""
+    consulta = (
+        select(ExpenseInstallment.month, func.sum(ExpenseInstallment.amount_cents))
+        .where(ExpenseInstallment.month.in_(period.months))
+        .group_by(ExpenseInstallment.month)
+    )
+    encontrados = {mes: int(total or 0) for mes, total in session.execute(consulta)}
+    return {mes: encontrados.get(mes, 0) for mes in period.months}
+
+
+def sum_expenses_until(session: Session, month: date, category_id: int) -> int:
     """Total gasto na categoria até o fim do mês (para envelopes acumulativos)."""
     consulta = (
         select(func.coalesce(func.sum(ExpenseInstallment.amount_cents), 0))
         .join(Expense, ExpenseInstallment.expense_id == Expense.id)
         .where(ExpenseInstallment.month <= month_start(month))
-        .where(Expense.category == category)
+        .where(Expense.category_id == category_id)
     )
     return int(session.scalar(consulta) or 0)
 
@@ -406,19 +386,21 @@ def months_with_expenses(session: Session) -> list[date]:
 # --------------------------------------------------------------------------
 # Separações confirmadas
 # --------------------------------------------------------------------------
-def get_allocation(session: Session, month: date, category: Category) -> AllocationState | None:
+def get_allocation(
+    session: Session, month: date, category_id: int
+) -> AllocationState | None:
     """Estado de separação de uma categoria no mês."""
     return session.scalar(
         select(AllocationState)
         .where(AllocationState.month == month_start(month))
-        .where(AllocationState.category == category)
+        .where(AllocationState.category_id == category_id)
     )
 
 
 def set_allocation(
     session: Session,
     month: date,
-    category: Category,
+    category_id: int,
     *,
     separated_cents: int,
     revision: int,
@@ -427,9 +409,9 @@ def set_allocation(
     if separated_cents < 0:
         raise ValueError("Valor separado não pode ser negativo.")
 
-    estado = get_allocation(session, month, category)
+    estado = get_allocation(session, month, category_id)
     if estado is None:
-        estado = AllocationState(month=month_start(month), category=category)
+        estado = AllocationState(month=month_start(month), category_id=category_id)
         session.add(estado)
 
     estado.separated_cents = separated_cents
@@ -439,12 +421,12 @@ def set_allocation(
     return estado
 
 
-def sum_allocations_until(session: Session, month: date, category: Category) -> int:
+def sum_allocations_until(session: Session, month: date, category_id: int) -> int:
     """Total já separado para a categoria até o fim do mês."""
     consulta = (
         select(func.coalesce(func.sum(AllocationState.separated_cents), 0))
         .where(AllocationState.month <= month_start(month))
-        .where(AllocationState.category == category)
+        .where(AllocationState.category_id == category_id)
     )
     return int(session.scalar(consulta) or 0)
 
@@ -467,6 +449,20 @@ def latest_closing_until(session: Session, month: date) -> MonthlyClosing | None
     return session.scalar(
         select(MonthlyClosing)
         .where(MonthlyClosing.month <= month_start(month))
+        .order_by(MonthlyClosing.month.desc())
+        .limit(1)
+    )
+
+
+def latest_closing_in(session: Session, period: Period) -> MonthlyClosing | None:
+    """Fechamento mais recente dentro do período.
+
+    No modo anual é o que dá o patrimônio do ano: a posição mais nova
+    informada naquele ano, nunca a soma dos meses.
+    """
+    return session.scalar(
+        select(MonthlyClosing)
+        .where(MonthlyClosing.month.in_(period.months))
         .order_by(MonthlyClosing.month.desc())
         .limit(1)
     )
@@ -509,19 +505,38 @@ def list_closings(session: Session) -> list[MonthlyClosing]:
     return list(session.scalars(select(MonthlyClosing).order_by(MonthlyClosing.month)))
 
 
-def get_opening_balance(session: Session, category: Category) -> int:
+def sum_dividends(session: Session, period: Period) -> int:
+    """Dividendos informados dentro do período."""
+    consulta = select(func.coalesce(func.sum(MonthlyClosing.dividendos_cents), 0)).where(
+        MonthlyClosing.month.in_(period.months)
+    )
+    return int(session.scalar(consulta) or 0)
+
+
+def dividends_by_month(session: Session, period: Period) -> dict[date, int]:
+    """Dividendos de cada mês do período."""
+    consulta = select(MonthlyClosing.month, MonthlyClosing.dividendos_cents).where(
+        MonthlyClosing.month.in_(period.months)
+    )
+    encontrados = {mes: int(valor or 0) for mes, valor in session.execute(consulta)}
+    return {mes: encontrados.get(mes, 0) for mes in period.months}
+
+
+def get_opening_balance(session: Session, category_id: int) -> int:
     """Saldo inicial do envelope, em centavos."""
-    registro = session.get(OpeningBalance, category)
+    registro = session.get(OpeningBalance, category_id)
     return registro.amount_cents if registro else 0
 
 
 def set_opening_balance(
-    session: Session, category: Category, amount_cents: int, note: str | None = None
+    session: Session, category_id: int, amount_cents: int, note: str | None = None
 ) -> OpeningBalance:
     """Define o saldo inicial de um envelope."""
-    registro = session.get(OpeningBalance, category)
+    registro = session.get(OpeningBalance, category_id)
     if registro is None:
-        registro = OpeningBalance(category=category, amount_cents=amount_cents, note=note)
+        registro = OpeningBalance(
+            category_id=category_id, amount_cents=amount_cents, note=note
+        )
         session.add(registro)
     else:
         registro.amount_cents = amount_cents
@@ -539,3 +554,39 @@ def known_months(session: Session) -> list[date]:
     meses.update(months_with_allocations(session))
     meses.update(f.month for f in list_closings(session))
     return sorted(meses)
+
+
+# --------------------------------------------------------------------------
+# Configuração do plano (atalho sobre as versões de categoria)
+# --------------------------------------------------------------------------
+def list_plan_effective_months(session: Session) -> list[date]:
+    """Meses em que alguma versão de categoria passou a valer."""
+    return sorted(
+        set(session.scalars(select(CategoryVersion.effective_month))), reverse=True
+    )
+
+
+def upsert_settings_version(
+    session: Session,
+    *,
+    effective_month: date,
+    meta_reserva_cents: int | None = None,
+    percentuais_bp: dict[int, int] | None = None,
+) -> None:
+    """Aplica percentuais e meta a partir de um mês, em uma tacada.
+
+    Atalho conveniente sobre :mod:`core.categories` — não guarda nada por
+    fora: tudo vira versão de categoria, que continua sendo a única fonte
+    da verdade. ``percentuais_bp`` é indexado por ``category_id``.
+    """
+    alvo = month_start(effective_month)
+
+    for category_id, bp in (percentuais_bp or {}).items():
+        cat.upsert_version(session, category_id, alvo, percent_bp=bp)
+
+    if meta_reserva_cents is not None:
+        for vista in cat.resolve_active(session, alvo):
+            if vista.target_amount_cents is not None:
+                cat.upsert_version(
+                    session, vista.id, alvo, target_amount_cents=meta_reserva_cents
+                )

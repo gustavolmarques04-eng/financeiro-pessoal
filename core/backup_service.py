@@ -18,13 +18,14 @@ from sqlalchemy import select
 from .database import DATA_DIR, DEFAULT_DB_PATH, database_url, init_db, reset_engine
 from .models import (
     AllocationState,
+    Category,
+    CategoryVersion,
     Expense,
     ExpenseInstallment,
     Income,
     MonthlyClosing,
     MonthRevision,
     OpeningBalance,
-    SettingsVersion,
 )
 from .database import session_scope
 
@@ -32,7 +33,8 @@ BACKUP_DIR = DATA_DIR / "backups"
 
 #: Tabelas exportadas no JSON, na ordem em que devem ser lidas.
 TABELAS_EXPORT = (
-    ("settings_versions", SettingsVersion),
+    ("categories", Category),
+    ("category_versions", CategoryVersion),
     ("incomes", Income),
     ("expenses", Expense),
     ("expense_installments", ExpenseInstallment),
@@ -145,7 +147,13 @@ def _validar_banco(caminho: Path) -> None:
     finally:
         engine.dispose()
 
-    obrigatorias = {"incomes", "expenses", "expense_installments", "settings_versions"}
+    obrigatorias = {
+        "incomes",
+        "expenses",
+        "expense_installments",
+        "categories",
+        "category_versions",
+    }
     faltando = obrigatorias - tabelas
     if faltando:
         raise ValueError(f"Backup incompleto. Faltam as tabelas: {', '.join(sorted(faltando))}")
