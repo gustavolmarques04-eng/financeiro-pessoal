@@ -11,26 +11,23 @@ antes do aplicativo. Sem a variável, roda direto — o caso local.
 from __future__ import annotations
 
 import hmac
-import os
 import sys
 from pathlib import Path
 
 import streamlit as st
-from dotenv import load_dotenv
 
 RAIZ = Path(__file__).resolve().parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-load_dotenv(RAIZ / ".env")
-
+from core import settings  # noqa: E402
 from core.database import init_db  # noqa: E402
 from ui.shared import CSS  # noqa: E402
 
 
 def _senha_confere(digitada: str) -> bool:
     """Compara a senha em tempo constante para não vazar informação."""
-    esperada = os.getenv("APP_PASSWORD", "")
+    esperada = settings.app_password()
     return bool(esperada) and hmac.compare_digest(digitada, esperada)
 
 
@@ -39,7 +36,7 @@ def autenticar() -> bool:
 
     Devolve ``True`` quando o acesso está liberado.
     """
-    if not os.getenv("APP_PASSWORD"):
+    if not settings.app_password():
         return True
     if st.session_state.get("_autenticado"):
         return True

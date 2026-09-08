@@ -175,7 +175,9 @@ class CategoryVersion(Base):
 
     name: Mapped[str] = mapped_column(String(80))
     emoji: Mapped[str | None] = mapped_column(String(8), default=None)
-    behavior: Mapped[CategoryBehavior] = mapped_column(Enum(CategoryBehavior))
+    behavior: Mapped[CategoryBehavior] = mapped_column(
+        Enum(CategoryBehavior, native_enum=False, length=30)
+    )
     percent_bp: Mapped[int] = mapped_column(Integer, default=0)
     display_order: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(default=True)
@@ -192,7 +194,7 @@ class CategoryVersion(Base):
     include_in_net_worth: Mapped[bool] = mapped_column(default=False)
     #: Campo do fechamento que informa o saldo real (em vez de calculá-lo).
     balance_from_closing: Mapped[ClosingField | None] = mapped_column(
-        Enum(ClosingField), default=None
+        Enum(ClosingField, native_enum=False, length=20), default=None
     )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -232,7 +234,7 @@ class Income(Base):
     date: Mapped[date] = mapped_column(Date, index=True)
     month: Mapped[date] = mapped_column(Date, index=True)
     description: Mapped[str] = mapped_column(String(200))
-    type: Mapped[IncomeType] = mapped_column(Enum(IncomeType))
+    type: Mapped[IncomeType] = mapped_column(Enum(IncomeType, native_enum=False, length=30))
     amount_cents: Mapped[int] = mapped_column(Integer)
     counts_in_budget: Mapped[bool] = mapped_column(default=True)
     note: Mapped[str | None] = mapped_column(String(300), default=None)
@@ -264,7 +266,9 @@ class Expense(Base):
         ForeignKey("categories.id", ondelete="RESTRICT"), index=True
     )
     total_cents: Mapped[int] = mapped_column(Integer)
-    payment_method: Mapped[PaymentMethod] = mapped_column(Enum(PaymentMethod))
+    payment_method: Mapped[PaymentMethod] = mapped_column(
+        Enum(PaymentMethod, native_enum=False, length=20)
+    )
     installments_count: Mapped[int] = mapped_column(Integer, default=1)
     first_installment_month: Mapped[date] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(String(300), default=None)

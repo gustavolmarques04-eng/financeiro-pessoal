@@ -185,6 +185,8 @@ def _criar_categorias(conn) -> None:
                     "MONTHLY_SPENDING",
                     "TRACKING_ONLY",
                     name="categorybehavior",
+                    native_enum=False,
+                    length=30,
                 ),
                 nullable=False,
             ),
@@ -212,7 +214,10 @@ def _criar_categorias(conn) -> None:
             ),
             sa.Column(
                 "balance_from_closing",
-                sa.Enum("RESERVA", "INVESTIMENTOS", name="closingfield"),
+                sa.Enum(
+                    "RESERVA", "INVESTIMENTOS", name="closingfield",
+                    native_enum=False, length=20,
+                ),
                 nullable=True,
             ),
             sa.Column("created_at", sa.DateTime(), nullable=True),

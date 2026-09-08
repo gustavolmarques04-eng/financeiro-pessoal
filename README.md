@@ -26,8 +26,11 @@ No macOS/Linux: `source .venv/bin/activate`
 Instale as dependências:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+`requirements.txt` tem só o que o aplicativo publicado precisa;
+`requirements-dev.txt` acrescenta o `pytest`.
 
 ## Executar
 
@@ -189,46 +192,69 @@ Backup manual: copie o arquivo `data/financeiro.db`.
 
 ---
 
-## Trocar SQLite por PostgreSQL/Supabase
+## Publicar no Streamlit Community Cloud
 
-Nenhum código muda. Copie `.env.example` para `.env` e ajuste:
+O aplicativo já está pronto para a nuvem: os segredos vêm de
+`st.secrets` ou do ambiente, e o banco é escolhido por `DATABASE_URL`.
+
+### 1. Criar o banco PostgreSQL
+
+Crie um projeto no [Supabase](https://supabase.com) ou no
+[Neon](https://neon.tech) (ambos têm plano gratuito) e copie a *connection
+string*. Adapte o começo dela para o driver usado aqui:
 
 ```
-DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
+postgresql+psycopg://usuario:senha@host:5432/postgres
 ```
+
+No Supabase, use a porta do **Connection pooler** (6543) se a conexão
+direta falhar.
+
+### 2. Levar os dados para lá
 
 ```bash
-pip install "psycopg[binary]"
-streamlit run app.py
+python migrar_para_nuvem.py --destino "postgresql+psycopg://..."
 ```
 
-As tabelas são criadas na primeira execução. Para levar os dados junto,
-exporte o JSON antes de trocar.
+O script mostra quantas linhas existem de cada lado, cria o esquema pelas
+migrações, copia tudo numa única transação e confere as contagens no fim.
+O banco local **não é alterado** — ele continua servindo de backup.
 
-## Publicar como site privado
+### 3. Subir o código para o GitHub
 
-1. Defina uma senha no `.env` do servidor:
+O Streamlit Community Cloud exige repositório público. Nada sensível vai
+junto: `.gitignore` bloqueia o banco, os backups, o `.env` e o
+`secrets.toml`.
 
-   ```
-   APP_PASSWORD=uma-senha-forte
-   ```
+```bash
+git remote add origin https://github.com/SEU_USUARIO/financeiro-pessoal.git
+git branch -M main
+git push -u origin main
+```
 
-   Com a variável definida, o app pede senha antes de abrir. Sem ela, roda
-   direto — que é o caso no seu computador. A senha nunca fica no código.
+### 4. Publicar
 
-2. Use PostgreSQL em vez de SQLite (veja acima): serviços de hospedagem
-   costumam apagar o disco a cada deploy.
+Em [share.streamlit.io](https://share.streamlit.io): **New app**, escolha o
+repositório, branch `main` e arquivo `app.py`. Em **Advanced settings**,
+escolha o Python 3.12 e cole os segredos:
 
-3. Publique em qualquer lugar que rode Python — Streamlit Community Cloud,
-   Railway, Render, Fly.io ou um VPS. O comando é o mesmo:
+```toml
+DATABASE_URL = "postgresql+psycopg://usuario:senha@host:5432/postgres"
+APP_PASSWORD = "uma-senha-forte"
+```
 
-   ```bash
-   streamlit run app.py --server.port $PORT --server.address 0.0.0.0
-   ```
+Sem `APP_PASSWORD` o aplicativo abre para qualquer pessoa com o link —
+defina sempre.
 
-4. Sirva sempre por HTTPS e não versione o `.env`.
+### 5. Usar no iPhone
 
----
+Abra o endereço no Safari, toque em Compartilhar → **Adicionar à Tela de
+Início**. Fica com ícone próprio e abre em tela cheia, como um app.
+
+### Voltar a rodar local
+
+Basta não definir `DATABASE_URL`: o app volta a usar `data/financeiro.db`.
+Para rodar local já apontando para a nuvem, ponha a URL no `.env`.
 
 ## Estrutura
 

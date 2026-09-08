@@ -24,7 +24,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", database_url())
+# Quem chama pode fixar a URL (é o caso da migração para a nuvem, que aponta
+# para outro banco). Só caímos na configuração do app quando ninguém definiu.
+if not config.get_main_option("sqlalchemy.url", ""):
+    config.set_main_option("sqlalchemy.url", database_url())
 target_metadata = Base.metadata
 
 

@@ -9,3 +9,6 @@ data/*.db
 data/backups/
 *.sqlite
 *.sqlite3
+
+# Segredos do Streamlit nunca vão para o repositório
+.streamlit/secrets.toml

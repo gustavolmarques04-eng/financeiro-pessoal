@@ -6,22 +6,19 @@ Todo o acesso ao banco passa por aqui. Trocar SQLite por PostgreSQL/Supabase
 
 from __future__ import annotations
 
-import os
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from . import settings
 from .categories import seed_categories
 from .models import Base
-
-load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -32,8 +29,12 @@ _SessionFactory: sessionmaker[Session] | None = None
 
 
 def database_url() -> str:
-    """URL do banco: ``DATABASE_URL`` do ambiente ou o SQLite local."""
-    url = os.getenv("DATABASE_URL", "").strip()
+    """URL do banco: ``DATABASE_URL`` configurada ou o SQLite local.
+
+    Na nuvem a URL aponta para o PostgreSQL e vem dos segredos do Streamlit;
+    no seu computador, sem configurar nada, cai no arquivo local.
+    """
+    url = settings.database_url()
     if url:
         return url
     DATA_DIR.mkdir(parents=True, exist_ok=True)
