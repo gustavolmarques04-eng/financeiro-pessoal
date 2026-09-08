@@ -137,6 +137,16 @@ def _backup_antes_da_migracao() -> Path | None:
     return destino
 
 
+def url_para_alembic(url: str) -> str:
+    """Prepara a URL para o ``configparser`` usado pelo Alembic.
+
+    O configparser interpreta ``%`` como início de interpolação. Uma senha
+    percent-encoded (``%40`` para ``@``) faria a leitura da configuração
+    explodir, derrubando o app logo no arranque — dobrar o sinal resolve.
+    """
+    return url.replace("%", "%%")
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """Leva o banco até a última migração do Alembic.
 
@@ -151,7 +161,7 @@ def run_migrations(engine: Engine | None = None) -> None:
     eng = engine or get_engine()
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", database_url())
+    config.set_main_option("sqlalchemy.url", url_para_alembic(database_url()))
     config.attributes["connection"] = None
 
     with eng.connect() as conexao:

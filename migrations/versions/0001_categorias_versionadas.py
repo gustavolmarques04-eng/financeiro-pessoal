@@ -324,7 +324,7 @@ def _versoes_do_plano(conn, ids: dict[str, int]) -> None:
                     " overflow_target_category_id, counts_as_investment_capital,"
                     " include_in_net_worth, balance_from_closing, created_at"
                     ") VALUES ("
-                    " :cid, :mes, :nome, :emoji, :beh, :pct, :ordem, 1, :meta,"
+                    " :cid, :mes, :nome, :emoji, :beh, :pct, :ordem, :ativo, :meta,"
                     " :overflow, :capital, :patrimonio, :closing, :criado)"
                 ),
                 {
@@ -335,10 +335,11 @@ def _versoes_do_plano(conn, ids: dict[str, int]) -> None:
                     "beh": seed["behavior"],
                     "pct": percentual,
                     "ordem": seed["display_order"],
+                    "ativo": True,
                     "meta": meta if seed.get("target_amount_cents") else None,
                     "overflow": ids[str(overflow)] if overflow else None,
-                    "capital": 1 if seed.get("counts_as_investment_capital") else 0,
-                    "patrimonio": 1 if seed.get("include_in_net_worth") else 0,
+                    "capital": bool(seed.get("counts_as_investment_capital")),
+                    "patrimonio": bool(seed.get("include_in_net_worth")),
                     "closing": seed.get("balance_from_closing"),
                     "criado": agora,
                 },

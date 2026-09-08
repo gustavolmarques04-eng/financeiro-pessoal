@@ -23,7 +23,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from sqlalchemy import create_engine, func, insert, select
+from sqlalchemy import create_engine, func, insert, select, text
 from sqlalchemy.orm import Session
 
 RAIZ = Path(__file__).resolve().parent
@@ -31,7 +31,7 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from core import settings  # noqa: E402
-from core.database import DEFAULT_DB_PATH  # noqa: E402
+from core.database import DEFAULT_DB_PATH, url_para_alembic  # noqa: E402
 from core.models import (  # noqa: E402
     AllocationState,
     Category,
@@ -92,7 +92,7 @@ def criar_esquema(destino_url: str) -> None:
 
     config = Config(str(RAIZ / "alembic.ini"))
     config.set_main_option("script_location", str(RAIZ / "migrations"))
-    config.set_main_option("sqlalchemy.url", destino_url)
+    config.set_main_option("sqlalchemy.url", url_para_alembic(destino_url))
     command.upgrade(config, "head")
 
 
@@ -117,6 +117,44 @@ def copiar(origem_url: str, destino_url: str) -> dict[str, int]:
         return copiadas
     finally:
         origem.dispose()
+        destino.dispose()
+
+
+def ajustar_sequencias(destino_url: str) -> list[str]:
+    """Recoloca as sequências do PostgreSQL depois da cópia.
+
+    As linhas são copiadas com o ``id`` original, e nesse caso o PostgreSQL
+    **não** avança a sequência da coluna. Sem este ajuste, o primeiro
+    registro criado no app tentaria reusar o id 1 e falharia com violação de
+    chave. O SQLite não tem esse problema, por isso o passo é específico.
+    """
+    if not destino_url.startswith("postgresql"):
+        return []
+
+    ajustadas = []
+    destino = create_engine(destino_url, connect_args={"prepare_threshold": None})
+    try:
+        with destino.begin() as conexao:
+            for modelo in TABELAS:
+                tabela = modelo.__table__
+                if "id" not in tabela.columns:
+                    continue  # chave natural (mês, categoria): não tem sequência
+                nome = tabela.name
+                sequencia = conexao.execute(
+                    text("SELECT pg_get_serial_sequence(:t, 'id')"), {"t": nome}
+                ).scalar()
+                if not sequencia:
+                    continue
+                proximo = conexao.execute(
+                    text(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {nome}")
+                ).scalar_one()
+                conexao.execute(
+                    text("SELECT setval(:s, :v, false)"),
+                    {"s": sequencia, "v": proximo},
+                )
+                ajustadas.append(f"{nome} → próximo id {proximo}")
+        return ajustadas
+    finally:
         destino.dispose()
 
 

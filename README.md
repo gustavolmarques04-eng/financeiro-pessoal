@@ -226,8 +226,13 @@ python migrar_para_nuvem.py
 ```
 
 O script mostra quantas linhas existem de cada lado, cria o esquema pelas
-migrações, copia tudo numa única transação e confere as contagens no fim.
-O banco local **não é alterado** — ele continua servindo de backup.
+migrações, copia tudo numa única transação, reposiciona as sequências do
+PostgreSQL e confere as contagens no fim. O banco local **não é alterado** —
+ele continua servindo de backup.
+
+> O passo das sequências não é detalhe: as linhas são copiadas com o `id`
+> original e, nesse caso, o PostgreSQL não avança o contador sozinho. Sem
+> ajustar, o primeiro registro criado no app falharia com chave duplicada.
 
 ### 3. Subir o código para o GitHub
 

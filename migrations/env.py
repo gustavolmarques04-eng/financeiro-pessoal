@@ -17,7 +17,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from core.database import database_url  # noqa: E402
+from core.database import database_url, url_para_alembic  # noqa: E402
 from core.models import Base  # noqa: E402
 
 config = context.config
@@ -27,7 +27,7 @@ if config.config_file_name is not None:
 # Quem chama pode fixar a URL (é o caso da migração para a nuvem, que aponta
 # para outro banco). Só caímos na configuração do app quando ninguém definiu.
 if not config.get_main_option("sqlalchemy.url", ""):
-    config.set_main_option("sqlalchemy.url", database_url())
+    config.set_main_option("sqlalchemy.url", url_para_alembic(database_url()))
 target_metadata = Base.metadata
 
 

@@ -179,3 +179,44 @@ def test_troca_de_periodo_e_anunciada() -> None:
     assert "_anunciar_periodo" in codigo
     assert "Mostrando {periodo.label}" in codigo
     assert "Período alterado para {periodo.label}" in codigo
+
+
+# --------------------------------------------------------------------------
+# Senha percent-encoded não pode quebrar o Alembic
+# --------------------------------------------------------------------------
+def test_url_com_percent_sobrevive_ao_configparser_do_alembic() -> None:
+    """Uma senha com ``%40`` precisa atravessar a configuração do Alembic.
+
+    O configparser lê ``%`` como interpolação: sem escapar, o app não sobe
+    quando a senha do banco tem caractere codificado.
+    """
+    import sys
+
+    sys.path.insert(0, str(RAIZ))
+    from alembic.config import Config
+
+    from core.database import url_para_alembic
+
+    url = "postgresql+psycopg://user:%40senha%23@host.exemplo.com:5432/postgres"
+    config = Config()
+    config.set_main_option("sqlalchemy.url", url_para_alembic(url))
+
+    assert config.get_main_option("sqlalchemy.url") == url
+
+
+def test_todos_os_pontos_que_configuram_o_alembic_escapam_a_url() -> None:
+    """Nenhum lugar passa a URL crua para ``set_main_option``."""
+    arquivos = [
+        RAIZ / "core" / "database.py",
+        RAIZ / "migrations" / "env.py",
+        RAIZ / "migrar_para_nuvem.py",
+    ]
+    infratores = []
+    for arquivo in arquivos:
+        for numero, linha in enumerate(
+            arquivo.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if 'set_main_option("sqlalchemy.url"' in linha:
+                if "url_para_alembic" not in linha:
+                    infratores.append(f"{arquivo.name}:{numero}")
+    assert infratores == [], infratores
