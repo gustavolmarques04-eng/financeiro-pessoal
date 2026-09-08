@@ -421,6 +421,33 @@ def set_allocation(
     return estado
 
 
+def list_allocations_until(
+    session: Session, month: date, category_id: int
+) -> list[AllocationState]:
+    """Separações da categoria até o mês, com data e hora da confirmação."""
+    return list(
+        session.scalars(
+            select(AllocationState)
+            .where(AllocationState.month <= month_start(month))
+            .where(AllocationState.category_id == category_id)
+            .order_by(AllocationState.month)
+        )
+    )
+
+
+def list_installments_until(
+    session: Session, month: date, category_id: int
+) -> list[tuple[ExpenseInstallment, Expense]]:
+    """Parcelas da categoria até o mês, com a compra de origem."""
+    consulta = (
+        select(ExpenseInstallment, Expense)
+        .join(Expense, ExpenseInstallment.expense_id == Expense.id)
+        .where(ExpenseInstallment.month <= month_start(month))
+        .where(Expense.category_id == category_id)
+    )
+    return [(parcela, gasto) for parcela, gasto in session.execute(consulta)]
+
+
 def sum_allocations_until(session: Session, month: date, category_id: int) -> int:
     """Total já separado para a categoria até o fim do mês."""
     consulta = (

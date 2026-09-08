@@ -42,28 +42,98 @@ def test_patrimonio_soma_as_quatro_parcelas(session: Session, receita, cats) -> 
     )
 
 
-def test_independencia_nao_entra_duas_vezes_no_patrimonio(
+def test_separacao_anterior_ao_fechamento_nao_conta_duas_vezes(
     session: Session, receita, cats
 ) -> None:
-    """Separar para a categoria de capital não infla o patrimônio por si só.
+    """Se você separou e só depois informou o saldo, o informado manda.
 
-    O dinheiro investido é representado pelo valor informado no fechamento;
-    somar também as separações contaria o mesmo dinheiro duas vezes.
+    O número digitado no fechamento já reflete a transferência — somar a
+    separação por cima contaria o mesmo dinheiro duas vezes.
+    """
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
+
+    repo.upsert_closing(
+        session,
+        SETEMBRO,
+        reserva_cents=0,
+        investimentos_cents=to_cents(1446.58),
+        dividendos_cents=0,
+    )
+
+    patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
+    assert patrimonio.valor_de("independencia") == to_cents(1446.58)
+
+
+def test_separacao_posterior_ao_fechamento_soma_ao_informado(
+    session: Session, receita, cats
+) -> None:
+    """Separar depois de informar o saldo soma ao que já estava guardado.
+
+    É o caso do dia a dia: você confere a caixinha, digita o valor e só
+    então marca a separação do mês.
     """
     receita(2952.21, mes=SETEMBRO)
     repo.upsert_closing(
         session,
         SETEMBRO,
-        reserva_cents=to_cents(1000),
-        investimentos_cents=to_cents(1000),
+        reserva_cents=to_cents(1273.79),
+        investimentos_cents=0,
         dividendos_cents=0,
     )
-    antes = budget.get_patrimonio(session, mes(SETEMBRO)).total_cents
 
-    budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
-    depois = budget.get_patrimonio(session, mes(SETEMBRO)).total_cents
+    antes = budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva")
+    assert antes == to_cents(1273.79)
 
-    assert depois == antes
+    budget.confirmar_separacao(session, SETEMBRO, cats["reserva"])
+
+    depois = budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva")
+    assert depois == to_cents(1273.79) + to_cents(501.88)
+
+
+def test_separacao_de_mes_posterior_sempre_soma(
+    session: Session, receita, cats
+) -> None:
+    """Uma separação de outubro nunca cabe no fechamento de setembro."""
+    receita(2952.21, mes=SETEMBRO)
+    receita(2952.21, mes=OUTUBRO)
+    repo.upsert_closing(
+        session,
+        SETEMBRO,
+        reserva_cents=to_cents(1000),
+        investimentos_cents=0,
+        dividendos_cents=0,
+    )
+    budget.confirmar_separacao(session, OUTUBRO, cats["reserva"])
+
+    assert budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva") == (
+        to_cents(1000)
+    )
+    assert budget.get_patrimonio(session, mes(OUTUBRO)).valor_de("reserva") == (
+        to_cents(1000) + to_cents(501.88)
+    )
+
+
+def test_novo_fechamento_reconcilia_o_saldo(session: Session, receita, cats) -> None:
+    """Informar o saldo de novo zera o acúmulo e volta a valer o número real."""
+    receita(2952.21, mes=SETEMBRO)
+    repo.upsert_closing(
+        session, SETEMBRO, reserva_cents=to_cents(1273.79),
+        investimentos_cents=0, dividendos_cents=0,
+    )
+    budget.confirmar_separacao(session, SETEMBRO, cats["reserva"])
+    assert budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva") == (
+        to_cents(1273.79) + to_cents(501.88)
+    )
+
+    # No mês seguinte você confere a conta e digita o valor real.
+    repo.upsert_closing(
+        session, OUTUBRO, reserva_cents=to_cents(1800),
+        investimentos_cents=0, dividendos_cents=0,
+    )
+    assert budget.get_patrimonio(session, mes(OUTUBRO)).valor_de("reserva") == (
+        to_cents(1800)
+    )
 
 
 def test_patrimonio_sem_fechamento_nao_inventa_valor(

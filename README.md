@@ -152,6 +152,16 @@ regra não conhece "Reserva" nem "Independência" pelo nome.
 **Envelopes** acumulam entre meses (separações confirmadas menos gastos da
 categoria). **Orçamentos mensais** recomeçam do zero.
 
+**Reserva e Investimentos** funcionam com *checkpoint*: o valor informado no
+fechamento é a última posição conferida, e tudo que você separa **depois**
+dele é somado por cima. Assim "já separei R$ 502,82 para a Reserva" aparece
+somado ao que você já tinha, sem precisar voltar ao fechamento. Quando você
+informa o saldo de novo, o número digitado vira a nova verdade e o acúmulo
+recomeça — nunca conta duas vezes.
+
+Para a regra da meta o app usa o saldo *antes* das separações do mês em
+curso, para o valor planejado não mudar enquanto você confirma.
+
 **Patrimônio total** soma automaticamente todas as categorias marcadas com
 *"saldo entra no patrimônio"*. Criar um envelope novo já o inclui, sem
 mexer em código.

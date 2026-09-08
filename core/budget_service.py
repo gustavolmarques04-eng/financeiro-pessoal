@@ -31,7 +31,7 @@ Conceitos centrais
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -40,7 +40,7 @@ from . import repositories as repo
 from .categories import CategoryView
 from .models import CategoryBehavior, ClosingField
 from .period import Period
-from .utils import month_start, split_proportionally
+from .utils import add_months, month_start, split_proportionally
 
 TOTAL_BP = cat.TOTAL_BP
 
@@ -278,23 +278,88 @@ def aplicar_regras_de_meta(
 # --------------------------------------------------------------------------
 # Saldos por categoria
 # --------------------------------------------------------------------------
-def saldo_categoria(session: Session, vista: CategoryView, month: date) -> int:
+def _depois_do_checkpoint(
+    mes_registro: date,
+    quando_registro: datetime | None,
+    checkpoint_mes: date | None,
+    checkpoint_quando: datetime | None,
+) -> bool:
+    """Se um lançamento ainda não está refletido na última posição informada.
+
+    Vale quando o lançamento é de um mês posterior ao do fechamento, ou
+    quando foi registrado depois de você ter informado aquele saldo.
+    """
+    if checkpoint_mes is None:
+        return True
+    if mes_registro > checkpoint_mes:
+        return True
+    if quando_registro is None or checkpoint_quando is None:
+        return False
+    return quando_registro > checkpoint_quando
+
+
+def saldo_categoria(
+    session: Session,
+    vista: CategoryView,
+    month: date,
+    *,
+    incluir_o_mes: bool = True,
+) -> int:
     """Saldo de uma categoria no fim do mês.
 
-    Quando a versão declara ``balance_from_closing``, o saldo é o que o
-    usuário informou no fechamento. Caso contrário é calculado::
+    Categorias sem ``balance_from_closing`` são puro envelope::
 
         saldo inicial + separações confirmadas − gastos da categoria
+
+    Categorias ligadas a um campo do fechamento (Reserva, Investimentos)
+    usam o valor informado como **checkpoint** e somam por cima o que veio
+    depois dele::
+
+        saldo informado + separações feitas depois − gastos feitos depois
+
+    É o que faz "já separei R$ 502,82 para a Reserva" aparecer somado ao que
+    você já tinha guardado, sem contar duas vezes quando você informar o
+    novo saldo real no próximo fechamento.
+
+    Com ``incluir_o_mes=False`` as movimentações do próprio mês ficam de
+    fora. A regra da meta usa esse modo para o planejado não mudar enquanto
+    você confirma as separações daquele mês.
     """
     alvo = month_start(month)
-    if vista.balance_from_closing is not None:
-        fechamento = repo.latest_closing_until(session, alvo)
-        return fechamento.valor_de(vista.balance_from_closing) if fechamento else 0
+    limite = alvo if incluir_o_mes else add_months(alvo, -1)
 
-    inicial = repo.get_opening_balance(session, vista.id)
-    separado = repo.sum_allocations_until(session, alvo, vista.id)
-    gasto = repo.sum_expenses_until(session, alvo, vista.id)
-    return inicial + separado - gasto
+    if vista.balance_from_closing is None:
+        inicial = repo.get_opening_balance(session, vista.id)
+        separado = repo.sum_allocations_until(session, limite, vista.id)
+        gasto = repo.sum_expenses_until(session, limite, vista.id)
+        return inicial + separado - gasto
+
+    fechamento = repo.latest_closing_until(session, alvo)
+    if fechamento is None:
+        base, checkpoint_mes, checkpoint_quando = (
+            repo.get_opening_balance(session, vista.id),
+            None,
+            None,
+        )
+    else:
+        base = fechamento.valor_de(vista.balance_from_closing)
+        checkpoint_mes, checkpoint_quando = fechamento.month, fechamento.updated_at
+
+    separado = sum(
+        estado.separated_cents
+        for estado in repo.list_allocations_until(session, limite, vista.id)
+        if _depois_do_checkpoint(
+            estado.month, estado.confirmed_at, checkpoint_mes, checkpoint_quando
+        )
+    )
+    gasto = sum(
+        parcela.amount_cents
+        for parcela, compra in repo.list_installments_until(session, limite, vista.id)
+        if _depois_do_checkpoint(
+            parcela.month, compra.created_at, checkpoint_mes, checkpoint_quando
+        )
+    )
+    return base + separado - gasto
 
 
 def saldos_das_categorias(
@@ -323,9 +388,13 @@ def get_month_plan(session: Session, month: date) -> MonthPlan:
     gasto_total = repo.sum_expenses(session, periodo)
 
     bruto = distribuir(base, vistas)
-    saldos = saldos_das_categorias(
-        session, [v for v in vistas if v.target_amount_cents is not None], alvo
-    )
+    # O saldo de referência da meta ignora as separações do próprio mês:
+    # sem isso, confirmar a separação encolheria o planejado no mesmo passo.
+    saldos = {
+        v.id: saldo_categoria(session, v, alvo, incluir_o_mes=False)
+        for v in vistas
+        if v.target_amount_cents is not None
+    }
     planejado, sobra = aplicar_regras_de_meta(bruto, vistas, saldos)
 
     separacoes: list[SeparacaoLinha] = []

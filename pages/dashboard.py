@@ -236,6 +236,11 @@ if metas:
             )
             if not meta.informado:
                 st.caption("Valor vem do 📅 Fechamento mensal. Ainda não informado.")
+            elif meta.categoria.balance_from_closing is not None:
+                st.caption(
+                    "Último valor informado no fechamento **+** o que você separou "
+                    "depois dele."
+                )
 
 
 # --------------------------------------------------------------------------

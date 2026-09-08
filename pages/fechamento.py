@@ -138,8 +138,15 @@ if apagar:
     st.success("Fechamento removido.")
     st.rerun()
 
+st.info(
+    "Informe aqui o que você **realmente tem** hoje nessas contas. A partir "
+    "desse valor, tudo que você separar depois é somado automaticamente — não "
+    "precisa voltar aqui a cada separação. Quando informar de novo, o número "
+    "digitado vira a nova verdade e o acúmulo recomeça, sem contar duas vezes.",
+    icon="💡",
+)
 st.caption(
-    "A reserva informada aqui alimenta a regra da meta: quando faltar menos que o "
+    "O valor informado também alimenta a regra da meta: quando faltar menos que o "
     "percentual para chegar ao alvo, a sobra vai para a categoria de destino."
 )
 
