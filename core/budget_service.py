@@ -35,6 +35,7 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
+from . import cache
 from . import categories as cat
 from . import repositories as repo
 from .categories import CategoryView
@@ -377,8 +378,17 @@ def get_month_plan(session: Session, month: date) -> MonthPlan:
 
     Ponto de entrada usado por todas as telas: Home, Separações, Receitas,
     Gastos e Fechamento leem daqui, nunca recalculam.
+
+    O resultado fica em cache pelo tempo da sessão. Uma tela pede o plano
+    várias vezes — os cartões, o aviso de separações, o orçamento — e sem
+    isso cada pedido repetiria dezenas de consultas.
     """
     alvo = month_start(month)
+    return cache.obter(session, f"plano:{alvo}", lambda: _montar_plano(session, alvo))
+
+
+def _montar_plano(session: Session, alvo: date) -> MonthPlan:
+    """Calcula o plano do mês de fato, sem passar pelo cache."""
     periodo = Period.of_month(alvo)
     vistas = cat.resolve_all(session, alvo)
     revision = repo.get_revision(session, alvo)

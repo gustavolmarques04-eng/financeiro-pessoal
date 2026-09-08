@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from . import cache
 from . import categories as cat
 from .models import (
     AllocationState,
@@ -125,6 +126,7 @@ def create_income(
     )
     session.add(receita)
     session.flush()
+    cache.limpar(session)
     bump_revision(session, receita.month)
     return receita
 
@@ -154,6 +156,7 @@ def update_income(
     receita.counts_in_budget = counts_in_budget
     receita.note = note
     session.flush()
+    cache.limpar(session)
 
     for mes in {mes_antigo, receita.month}:
         bump_revision(session, mes)
@@ -168,6 +171,7 @@ def delete_income(session: Session, income_id: int) -> None:
     mes = receita.month
     session.delete(receita)
     session.flush()
+    cache.limpar(session)
     bump_revision(session, mes)
 
 
@@ -262,6 +266,7 @@ def create_expense(
     session.add(gasto)
     session.flush()
     _rebuild_installments(session, gasto)
+    cache.limpar(session)
     return gasto
 
 
@@ -295,6 +300,7 @@ def update_expense(
     gasto.note = note
     session.flush()
     _rebuild_installments(session, gasto)
+    cache.limpar(session)
     return gasto
 
 
@@ -305,6 +311,7 @@ def delete_expense(session: Session, expense_id: int) -> None:
         return
     session.delete(gasto)
     session.flush()
+    cache.limpar(session)
 
 
 def get_expense(session: Session, expense_id: int) -> Expense | None:
@@ -331,18 +338,30 @@ def list_installments(
     return [(parcela, gasto) for parcela, gasto in session.execute(consulta)]
 
 
+def expenses_by_category(session: Session, period: Period) -> dict[int, int]:
+    """Gasto do período por categoria, numa consulta só."""
+    chave = f"gastos_por_categoria:{period.mode.value}:{period.anchor}"
+
+    def calcular() -> dict[int, int]:
+        consulta = (
+            select(Expense.category_id, func.sum(ExpenseInstallment.amount_cents))
+            .join(Expense, ExpenseInstallment.expense_id == Expense.id)
+            .where(ExpenseInstallment.month.in_(period.months))
+            .group_by(Expense.category_id)
+        )
+        return {cid: int(total or 0) for cid, total in session.execute(consulta)}
+
+    return cache.obter(session, chave, calcular)
+
+
 def sum_expenses(
     session: Session, period: Period, *, category_id: int | None = None
 ) -> int:
     """Total gasto no período (somando parcelas), opcionalmente por categoria."""
-    consulta = (
-        select(func.coalesce(func.sum(ExpenseInstallment.amount_cents), 0))
-        .join(Expense, ExpenseInstallment.expense_id == Expense.id)
-        .where(ExpenseInstallment.month.in_(period.months))
-    )
+    por_categoria = expenses_by_category(session, period)
     if category_id is not None:
-        consulta = consulta.where(Expense.category_id == category_id)
-    return int(session.scalar(consulta) or 0)
+        return por_categoria.get(category_id, 0)
+    return sum(por_categoria.values())
 
 
 def expenses_by_month(session: Session, period: Period) -> dict[date, int]:
@@ -356,15 +375,25 @@ def expenses_by_month(session: Session, period: Period) -> dict[date, int]:
     return {mes: encontrados.get(mes, 0) for mes in period.months}
 
 
+def expenses_until_by_category(session: Session, month: date) -> dict[int, int]:
+    """Gasto acumulado até o mês, por categoria, numa consulta só."""
+    alvo = month_start(month)
+
+    def calcular() -> dict[int, int]:
+        consulta = (
+            select(Expense.category_id, func.sum(ExpenseInstallment.amount_cents))
+            .join(Expense, ExpenseInstallment.expense_id == Expense.id)
+            .where(ExpenseInstallment.month <= alvo)
+            .group_by(Expense.category_id)
+        )
+        return {cid: int(total or 0) for cid, total in session.execute(consulta)}
+
+    return cache.obter(session, f"gastos_ate:{alvo}", calcular)
+
+
 def sum_expenses_until(session: Session, month: date, category_id: int) -> int:
     """Total gasto na categoria até o fim do mês (para envelopes acumulativos)."""
-    consulta = (
-        select(func.coalesce(func.sum(ExpenseInstallment.amount_cents), 0))
-        .join(Expense, ExpenseInstallment.expense_id == Expense.id)
-        .where(ExpenseInstallment.month <= month_start(month))
-        .where(Expense.category_id == category_id)
-    )
-    return int(session.scalar(consulta) or 0)
+    return expenses_until_by_category(session, month).get(category_id, 0)
 
 
 def future_installments(session: Session, after_month: date) -> list[tuple[date, int]]:
@@ -386,15 +415,24 @@ def months_with_expenses(session: Session) -> list[date]:
 # --------------------------------------------------------------------------
 # Separações confirmadas
 # --------------------------------------------------------------------------
+def allocations_by_month(session: Session, month: date) -> dict[int, AllocationState]:
+    """Separações do mês indexadas por categoria, numa consulta só."""
+    alvo = month_start(month)
+
+    def calcular() -> dict[int, AllocationState]:
+        linhas = session.scalars(
+            select(AllocationState).where(AllocationState.month == alvo)
+        )
+        return {estado.category_id: estado for estado in linhas}
+
+    return cache.obter(session, f"separacoes:{alvo}", calcular)
+
+
 def get_allocation(
     session: Session, month: date, category_id: int
 ) -> AllocationState | None:
     """Estado de separação de uma categoria no mês."""
-    return session.scalar(
-        select(AllocationState)
-        .where(AllocationState.month == month_start(month))
-        .where(AllocationState.category_id == category_id)
-    )
+    return allocations_by_month(session, month).get(category_id)
 
 
 def set_allocation(
@@ -418,6 +456,7 @@ def set_allocation(
     estado.confirmed_revision = revision
     estado.confirmed_at = datetime.now(timezone.utc) if separated_cents else None
     session.flush()
+    cache.limpar(session)
     return estado
 
 
@@ -425,37 +464,64 @@ def list_allocations_until(
     session: Session, month: date, category_id: int
 ) -> list[AllocationState]:
     """Separações da categoria até o mês, com data e hora da confirmação."""
-    return list(
-        session.scalars(
+    alvo = month_start(month)
+
+    def calcular() -> dict[int, list[AllocationState]]:
+        agrupado: dict[int, list[AllocationState]] = {}
+        linhas = session.scalars(
             select(AllocationState)
-            .where(AllocationState.month <= month_start(month))
-            .where(AllocationState.category_id == category_id)
+            .where(AllocationState.month <= alvo)
             .order_by(AllocationState.month)
         )
-    )
+        for estado in linhas:
+            agrupado.setdefault(estado.category_id, []).append(estado)
+        return agrupado
+
+    agrupado = cache.obter(session, f"separacoes_ate:{alvo}", calcular)
+    return agrupado.get(category_id, [])
 
 
 def list_installments_until(
     session: Session, month: date, category_id: int
 ) -> list[tuple[ExpenseInstallment, Expense]]:
     """Parcelas da categoria até o mês, com a compra de origem."""
-    consulta = (
-        select(ExpenseInstallment, Expense)
-        .join(Expense, ExpenseInstallment.expense_id == Expense.id)
-        .where(ExpenseInstallment.month <= month_start(month))
-        .where(Expense.category_id == category_id)
-    )
-    return [(parcela, gasto) for parcela, gasto in session.execute(consulta)]
+    alvo = month_start(month)
+
+    def calcular() -> dict[int, list[tuple[ExpenseInstallment, Expense]]]:
+        agrupado: dict[int, list[tuple[ExpenseInstallment, Expense]]] = {}
+        consulta = (
+            select(ExpenseInstallment, Expense)
+            .join(Expense, ExpenseInstallment.expense_id == Expense.id)
+            .where(ExpenseInstallment.month <= alvo)
+        )
+        for parcela, gasto in session.execute(consulta):
+            agrupado.setdefault(gasto.category_id, []).append((parcela, gasto))
+        return agrupado
+
+    agrupado = cache.obter(session, f"parcelas_ate:{alvo}", calcular)
+    return agrupado.get(category_id, [])
+
+
+def allocations_until_by_category(session: Session, month: date) -> dict[int, int]:
+    """Separado acumulado até o mês, por categoria, numa consulta só."""
+    alvo = month_start(month)
+
+    def calcular() -> dict[int, int]:
+        consulta = (
+            select(
+                AllocationState.category_id, func.sum(AllocationState.separated_cents)
+            )
+            .where(AllocationState.month <= alvo)
+            .group_by(AllocationState.category_id)
+        )
+        return {cid: int(total or 0) for cid, total in session.execute(consulta)}
+
+    return cache.obter(session, f"separado_ate:{alvo}", calcular)
 
 
 def sum_allocations_until(session: Session, month: date, category_id: int) -> int:
     """Total já separado para a categoria até o fim do mês."""
-    consulta = (
-        select(func.coalesce(func.sum(AllocationState.separated_cents), 0))
-        .where(AllocationState.month <= month_start(month))
-        .where(AllocationState.category_id == category_id)
-    )
-    return int(session.scalar(consulta) or 0)
+    return allocations_until_by_category(session, month).get(category_id, 0)
 
 
 def months_with_allocations(session: Session) -> list[date]:
@@ -466,19 +532,32 @@ def months_with_allocations(session: Session) -> list[date]:
 # --------------------------------------------------------------------------
 # Fechamentos e saldos iniciais
 # --------------------------------------------------------------------------
+def _fechamentos_em_cache(session: Session) -> list[MonthlyClosing]:
+    """Todos os fechamentos, lidos uma vez por sessão.
+
+    São poucas linhas — uma por mês fechado — então trazer tudo sai mais
+    barato que uma consulta por pergunta.
+    """
+    return cache.obter(
+        session,
+        "fechamentos",
+        lambda: list(
+            session.scalars(select(MonthlyClosing).order_by(MonthlyClosing.month))
+        ),
+    )
+
+
 def get_closing(session: Session, month: date) -> MonthlyClosing | None:
     """Fechamento informado para o mês, se existir."""
-    return session.get(MonthlyClosing, month_start(month))
+    alvo = month_start(month)
+    return next((f for f in _fechamentos_em_cache(session) if f.month == alvo), None)
 
 
 def latest_closing_until(session: Session, month: date) -> MonthlyClosing | None:
     """Fechamento mais recente até o mês (inclusive)."""
-    return session.scalar(
-        select(MonthlyClosing)
-        .where(MonthlyClosing.month <= month_start(month))
-        .order_by(MonthlyClosing.month.desc())
-        .limit(1)
-    )
+    alvo = month_start(month)
+    anteriores = [f for f in _fechamentos_em_cache(session) if f.month <= alvo]
+    return anteriores[-1] if anteriores else None
 
 
 def latest_closing_in(session: Session, period: Period) -> MonthlyClosing | None:
@@ -487,12 +566,9 @@ def latest_closing_in(session: Session, period: Period) -> MonthlyClosing | None
     No modo anual é o que dá o patrimônio do ano: a posição mais nova
     informada naquele ano, nunca a soma dos meses.
     """
-    return session.scalar(
-        select(MonthlyClosing)
-        .where(MonthlyClosing.month.in_(period.months))
-        .order_by(MonthlyClosing.month.desc())
-        .limit(1)
-    )
+    meses = set(period.months)
+    dentro = [f for f in _fechamentos_em_cache(session) if f.month in meses]
+    return dentro[-1] if dentro else None
 
 
 def upsert_closing(
@@ -516,6 +592,7 @@ def upsert_closing(
     fechamento.dividendos_cents = dividendos_cents
     fechamento.note = note
     session.flush()
+    cache.limpar(session)
     return fechamento
 
 
@@ -525,34 +602,39 @@ def delete_closing(session: Session, month: date) -> None:
     if fechamento is not None:
         session.delete(fechamento)
         session.flush()
+        cache.limpar(session)
 
 
 def list_closings(session: Session) -> list[MonthlyClosing]:
     """Todos os fechamentos, do mais antigo para o mais novo."""
-    return list(session.scalars(select(MonthlyClosing).order_by(MonthlyClosing.month)))
+    return _fechamentos_em_cache(session)
 
 
 def sum_dividends(session: Session, period: Period) -> int:
     """Dividendos informados dentro do período."""
-    consulta = select(func.coalesce(func.sum(MonthlyClosing.dividendos_cents), 0)).where(
-        MonthlyClosing.month.in_(period.months)
+    meses = set(period.months)
+    return sum(
+        f.dividendos_cents for f in _fechamentos_em_cache(session) if f.month in meses
     )
-    return int(session.scalar(consulta) or 0)
 
 
 def dividends_by_month(session: Session, period: Period) -> dict[date, int]:
     """Dividendos de cada mês do período."""
-    consulta = select(MonthlyClosing.month, MonthlyClosing.dividendos_cents).where(
-        MonthlyClosing.month.in_(period.months)
-    )
-    encontrados = {mes: int(valor or 0) for mes, valor in session.execute(consulta)}
+    encontrados = {f.month: f.dividendos_cents for f in _fechamentos_em_cache(session)}
     return {mes: encontrados.get(mes, 0) for mes in period.months}
 
 
 def get_opening_balance(session: Session, category_id: int) -> int:
     """Saldo inicial do envelope, em centavos."""
-    registro = session.get(OpeningBalance, category_id)
-    return registro.amount_cents if registro else 0
+    saldos = cache.obter(
+        session,
+        "saldos_iniciais",
+        lambda: {
+            registro.category_id: registro.amount_cents
+            for registro in session.scalars(select(OpeningBalance))
+        },
+    )
+    return saldos.get(category_id, 0)
 
 
 def set_opening_balance(
@@ -570,6 +652,7 @@ def set_opening_balance(
         if note is not None:
             registro.note = note
     session.flush()
+    cache.limpar(session)
     return registro
 
 

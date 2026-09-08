@@ -220,3 +220,58 @@ def test_todos_os_pontos_que_configuram_o_alembic_escapam_a_url() -> None:
                 if "url_para_alembic" not in linha:
                     infratores.append(f"{arquivo.name}:{numero}")
     assert infratores == [], infratores
+
+
+# --------------------------------------------------------------------------
+# Desempenho: o Streamlit reexecuta a página inteira a cada clique
+# --------------------------------------------------------------------------
+def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
+    """Um render completo precisa caber em poucas idas ao banco.
+
+    Com o banco na nuvem cada consulta custa latência de rede. Este teste
+    trava a regressão que fez o app demorar segundos por clique: chamadas
+    1+N e recálculos repetidos do mesmo plano.
+    """
+    import sys
+    from datetime import date
+
+    sys.path.insert(0, str(RAIZ))
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from core import budget_service as budget
+    from core import investment_service as inv
+    from core import repositories as repo
+    from core.database import seed_defaults
+    from core.models import Base
+    from core.period import Period
+
+    engine = create_engine("sqlite://")  # em memória
+    Base.metadata.create_all(engine)
+    fabrica = sessionmaker(bind=engine)
+    with fabrica() as preparo:
+        seed_defaults(preparo)
+        preparo.commit()
+
+    consultas: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _contar(conn, cursor, stmt, params, ctx, many):  # type: ignore[no-untyped-def]
+        consultas.append(stmt)
+
+    periodo = Period.of_month(date(2026, 9, 1))
+    with fabrica() as session:
+        budget.get_resumo_periodo(session, periodo)
+        inv.get_resumo(session, periodo)
+        referencia = budget.mes_de_referencia(session, periodo)
+        budget.get_month_plan(session, referencia)
+        budget.resumo_separacoes(session, referencia)
+        budget.envelopes(session, periodo)
+        budget.metas(session, periodo)
+        repo.known_months(session)
+
+    engine.dispose()
+    assert len(consultas) <= 25, (
+        f"um render do dashboard fez {len(consultas)} consultas; "
+        "algo voltou a consultar por categoria ou recalcular o plano"
+    )

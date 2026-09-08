@@ -18,6 +18,7 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import cache
 from .models import (
     SEED_CATEGORIES,
     SEED_EFFECTIVE_MONTH,
@@ -176,23 +177,31 @@ def resolve_all(session: Session, month: date) -> list[CategoryView]:
 
     Útil para editar lançamentos históricos: uma categoria desativada em
     2027 continua aparecendo corretamente num gasto de 2026.
+
+    Resolve tudo em **uma consulta** e guarda o resultado na sessão: uma
+    tela chega a pedir isto uma dúzia de vezes, e com o banco na nuvem cada
+    ida custa caro.
     """
     alvo = month_start(month)
+    return cache.obter(session, f"categorias:{alvo}", lambda: _resolver(session, alvo))
+
+
+def _resolver(session: Session, alvo: date) -> list[CategoryView]:
+    """Lê todas as versões vigentes de uma vez e escolhe a última de cada."""
     linhas = session.execute(
-        select(Category.id, Category.slug).order_by(Category.id)
+        select(Category.slug, CategoryVersion)
+        .join(CategoryVersion, CategoryVersion.category_id == Category.id)
+        .where(CategoryVersion.effective_month <= alvo)
+        .order_by(CategoryVersion.effective_month, CategoryVersion.id)
     ).all()
 
-    vistas: list[CategoryView] = []
-    for categoria_id, slug in linhas:
-        versao = session.scalar(
-            select(CategoryVersion)
-            .where(CategoryVersion.category_id == categoria_id)
-            .where(CategoryVersion.effective_month <= alvo)
-            .order_by(CategoryVersion.effective_month.desc())
-            .limit(1)
-        )
-        if versao is not None:
-            vistas.append(_to_view(versao, slug, alvo))
+    # Em ordem crescente de vigência, a última versão lida de cada categoria
+    # é justamente a que vale no mês pedido.
+    vigentes: dict[int, tuple[str, CategoryVersion]] = {}
+    for slug, versao in linhas:
+        vigentes[versao.category_id] = (slug, versao)
+
+    vistas = [_to_view(versao, slug, alvo) for slug, versao in vigentes.values()]
     vistas.sort(key=lambda v: (v.display_order, v.name))
     return vistas
 
@@ -363,6 +372,7 @@ def upsert_version(
         setattr(versao, campo, valor)
 
     session.flush()
+    cache.limpar(session)
     return versao
 
 
@@ -398,6 +408,7 @@ def criar_categoria(
     categoria = Category(slug=slug)
     session.add(categoria)
     session.flush()
+    cache.limpar(session)
 
     if display_order is None:
         maximo = session.scalar(select(func.max(CategoryVersion.display_order))) or 0

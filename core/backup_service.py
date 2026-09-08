@@ -133,7 +133,7 @@ def restaurar_sqlite(conteudo: bytes) -> Path:
 
     reset_engine()
     shutil.move(str(temporario), str(destino))
-    init_db()
+    init_db(forcar=True)
     return destino
 
 

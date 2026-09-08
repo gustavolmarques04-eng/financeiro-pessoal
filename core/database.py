@@ -26,6 +26,9 @@ DEFAULT_DB_PATH = DATA_DIR / "financeiro.db"
 
 _engine: Engine | None = None
 _SessionFactory: sessionmaker[Session] | None = None
+#: O esquema só precisa ser conferido uma vez por processo. Sem esta trava,
+#: cada clique revalidaria as tabelas — caro quando o banco está na nuvem.
+_esquema_pronto = False
 
 
 def database_url() -> str:
@@ -174,22 +177,35 @@ def run_migrations(engine: Engine | None = None) -> None:
     command.upgrade(config, "head")
 
 
-def init_db(engine: Engine | None = None) -> Engine:
-    """Aplica as migrações pendentes e semeia os dados padrão."""
+def init_db(engine: Engine | None = None, *, forcar: bool = False) -> Engine:
+    """Aplica as migrações pendentes e semeia os dados padrão.
+
+    Roda uma vez por processo. O Streamlit reexecuta o script inteiro a cada
+    interação, e revalidar o esquema toda vez custaria mais de uma dezena de
+    idas ao banco antes de a tela sequer começar a desenhar.
+    """
+    global _esquema_pronto
     eng = engine or get_engine()
+    if _esquema_pronto and not forcar and engine is None:
+        return eng
+
     run_migrations(eng)
     Base.metadata.create_all(eng, checkfirst=True)
     factory = sessionmaker(bind=eng, expire_on_commit=False)
     with factory() as session:
         seed_defaults(session)
         session.commit()
+
+    if engine is None:
+        _esquema_pronto = True
     return eng
 
 
 def reset_engine() -> None:
     """Descarta o engine em cache. Usado pelos testes e pela restauração."""
-    global _engine, _SessionFactory
+    global _engine, _SessionFactory, _esquema_pronto
     if _engine is not None:
         _engine.dispose()
     _engine = None
     _SessionFactory = None
+    _esquema_pronto = False
