@@ -59,8 +59,19 @@ def get_engine(url: str | None = None, *, echo: bool = False) -> Engine:
 
     resolved = url or database_url()
     kwargs: dict[str, object] = {"echo": echo, "future": True}
+
     if resolved.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+    elif resolved.startswith("postgresql"):
+        # Bancos em nuvem derrubam conexões ociosas, e um app que fica
+        # aberto na aba do celular fica ocioso o tempo todo: testar a
+        # conexão antes de usar evita o erro na primeira ação do dia.
+        kwargs["pool_pre_ping"] = True
+        kwargs["pool_recycle"] = 300
+        # Em pooler de transação (PgBouncer) as prepared statements do
+        # psycopg não sobrevivem entre requisições. Desligá-las faz a mesma
+        # URL funcionar nos dois modos de pooling do Supabase.
+        kwargs["connect_args"] = {"prepare_threshold": None}
 
     engine = create_engine(resolved, **kwargs)  # type: ignore[arg-type]
     if resolved.startswith("sqlite"):
