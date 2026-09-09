@@ -341,3 +341,72 @@ def test_fluxo_completo_permanece_consistente(
     resumo = investimentos.get_resumo(session, mes(SETEMBRO))
     assert resumo.capital_destinado_cents == to_cents(1446.58)
     assert resumo.resultado_cents == 0
+
+
+# --------------------------------------------------------------------------
+# Dinheiro guardado x patrimônio
+# --------------------------------------------------------------------------
+def test_guardado_soma_tudo_e_patrimonio_so_o_marcado(
+    session: Session, receita, cats
+) -> None:
+    """Os dois números saem da mesma leitura e diferem pelo que foi marcado.
+
+    "Guardado" é todo dinheiro separado; "patrimônio" é a parte que não tem
+    destino certo de saída. Tirar Viagem do patrimônio não pode fazer o
+    dinheiro sumir do guardado.
+    """
+    repo.set_opening_balance(session, cats["compras"], 0)
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+    budget.confirmar_separacao(session, SETEMBRO, cats["compras"])
+
+    antes = budget.get_patrimonio(session, mes(SETEMBRO))
+    assert antes.guardado_cents == antes.total_cents, "nada excluído ainda"
+    assert antes.comprometido_cents == 0
+
+    cat.upsert_version(
+        session, cats["viagem"], SETEMBRO, include_in_net_worth=False
+    )
+    depois = budget.get_patrimonio(session, mes(SETEMBRO))
+
+    viagem = antes.valor_de("viagem")
+    assert viagem > 0, "o teste só vale se houver dinheiro na viagem"
+    assert depois.guardado_cents == antes.guardado_cents, "o dinheiro continua lá"
+    assert depois.total_cents == antes.total_cents - viagem
+    assert depois.comprometido_cents == viagem
+    assert depois.valor_de("viagem") == viagem, "a parcela não some da lista"
+
+
+def test_categoria_fora_do_patrimonio_nao_entra_nas_parcelas_do_patrimonio(
+    session: Session, receita, cats
+) -> None:
+    """A lista usada pelos gráficos respeita a marcação."""
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+    cat.upsert_version(
+        session, cats["viagem"], SETEMBRO, include_in_net_worth=False
+    )
+
+    patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
+    slugs = {p.categoria.slug for p in patrimonio.parcelas_no_patrimonio}
+
+    assert "viagem" not in slugs
+    assert "reserva" in slugs
+    assert sum(p.valor_cents for p in patrimonio.parcelas_no_patrimonio) == (
+        patrimonio.total_cents
+    )
+
+
+def test_gasto_em_categoria_de_consumo_nao_mexe_no_guardado(
+    session: Session, receita, gasto, cats
+) -> None:
+    """Gasto em orçamento mensal não é dinheiro guardado que saiu."""
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+    antes = budget.get_patrimonio(session, mes(SETEMBRO))
+
+    gasto(85.10, cats["livre"], mes=SETEMBRO)
+    depois = budget.get_patrimonio(session, mes(SETEMBRO))
+
+    assert depois.guardado_cents == antes.guardado_cents
+    assert depois.total_cents == antes.total_cents

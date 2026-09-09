@@ -596,6 +596,9 @@ class ParcelaPatrimonio:
 
     categoria: CategoryView
     valor_cents: int
+    #: Se entra no patrimônio, ou se é apenas dinheiro guardado com destino
+    #: certo de saída (uma viagem, uma compra). Vem de ``include_in_net_worth``.
+    no_patrimonio: bool = True
 
 
 @dataclass(frozen=True)
@@ -621,8 +624,28 @@ class Patrimonio:
 
     @property
     def total_cents(self) -> int:
-        """Soma das parcelas, sem contar nada duas vezes."""
+        """Patrimônio: só o que foi marcado como tal, sem contar duas vezes."""
+        return sum(p.valor_cents for p in self.parcelas if p.no_patrimonio)
+
+    @property
+    def guardado_cents(self) -> int:
+        """Todo o dinheiro separado, inclusive o que não é patrimônio.
+
+        A diferença para :attr:`total_cents` é o dinheiro com destino certo
+        de saída — envelopes de viagem, de compras. Ele existe na conta, mas
+        já está comprometido.
+        """
         return sum(p.valor_cents for p in self.parcelas)
+
+    @property
+    def comprometido_cents(self) -> int:
+        """Guardado que não conta como patrimônio."""
+        return self.guardado_cents - self.total_cents
+
+    @property
+    def parcelas_no_patrimonio(self) -> list["ParcelaPatrimonio"]:
+        """Só as parcelas que compõem o patrimônio."""
+        return [p for p in self.parcelas if p.no_patrimonio]
 
     def valor_de(self, slug: str) -> int:
         """Valor de uma parcela pelo slug da categoria."""
@@ -649,9 +672,20 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
         fechamento = repo.latest_closing_in(session, period)
         posicao = fechamento.month if fechamento else period.end
 
-    vistas = [v for v in cat.resolve_active(session, posicao) if v.include_in_net_worth]
+    # Entram todas as categorias que retêm saldo entre meses; a marca
+    # ``include_in_net_worth`` decide depois quais somam no patrimônio. Assim
+    # os dois números saem da mesma leitura, e nunca discordam.
+    vistas = [
+        v
+        for v in cat.resolve_active(session, posicao)
+        if v.behavior.requires_separation
+    ]
     parcelas = [
-        ParcelaPatrimonio(categoria=v, valor_cents=saldo_categoria(session, v, posicao))
+        ParcelaPatrimonio(
+            categoria=v,
+            valor_cents=saldo_categoria(session, v, posicao),
+            no_patrimonio=v.include_in_net_worth,
+        )
         for v in vistas
     ]
     return Patrimonio(
