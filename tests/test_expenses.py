@@ -136,10 +136,14 @@ def test_estouro_de_orcamento_fica_negativo(
     assert linha.estourou is True
 
 
-def test_categorias_mensais_nao_acumulam(
+def test_categorias_mensais_levam_a_sobra_para_o_mes_seguinte(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Namorada recomeça do zero no mês seguinte."""
+    """O que não foi gasto continua sendo seu no mês seguinte.
+
+    O dinheiro do orçamento de consumo fica na conta corrente: virar o mês
+    não o faz desaparecer.
+    """
     receita(1000.00, mes=SETEMBRO)
     receita(1000.00, mes=OUTUBRO)
     gasto(50.00, cats["namorada"], mes=SETEMBRO)
@@ -154,8 +158,38 @@ def test_categorias_mensais_nao_acumulam(
     )
 
     assert setembro.gasto_cents == to_cents(50)
+    assert setembro.vem_de_antes_cents == 0, "não havia mês anterior"
+    sobrou = setembro.disponivel_cents
+
     assert outubro.gasto_cents == 0
-    assert outubro.disponivel_cents == outubro.orcamento_cents
+    assert outubro.vem_de_antes_cents == sobrou
+    assert outubro.disponivel_cents == outubro.orcamento_cents + sobrou
+
+
+def test_estouro_vira_saldo_negativo_no_mes_seguinte(
+    session: Session, receita, gasto, cats
+) -> None:
+    """Gastar além do orçado deixa dívida, e ela também atravessa o mês."""
+    receita(1000.00, mes=SETEMBRO)
+    receita(1000.00, mes=OUTUBRO)
+
+    setembro_antes = next(
+        g for g in budget.get_month_plan(session, SETEMBRO).gastos
+        if g.categoria.slug == "namorada"
+    )
+    gasto(
+        float(setembro_antes.orcamento_cents) / 100 + 30.0,
+        cats["namorada"],
+        mes=SETEMBRO,
+    )
+
+    outubro = next(
+        g for g in budget.get_month_plan(session, OUTUBRO).gastos
+        if g.categoria.slug == "namorada"
+    )
+
+    assert outubro.vem_de_antes_cents == to_cents(-30)
+    assert outubro.disponivel_cents == outubro.orcamento_cents - to_cents(30)
 
 
 # --------------------------------------------------------------------------
@@ -230,4 +264,7 @@ def test_envelopes_vem_do_comportamento_e_nao_do_nome(
 
     assert slugs == {"viagem", "compras"}
     for linha in linhas:
-        assert linha.categoria.behavior.accumulates
+        assert linha.categoria.accumulates
+        assert not linha.categoria.is_monthly_budget, (
+            "orçamento de consumo acumula, mas se mostra na seção do mês"
+        )

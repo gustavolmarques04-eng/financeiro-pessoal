@@ -92,6 +92,15 @@ class CategoryBehavior(str, enum.Enum):
         return self is CategoryBehavior.ACCUMULATING_ENVELOPE
 
     @property
+    def acumula_por_padrao(self) -> bool:
+        """Se uma categoria nova deste tipo deve guardar a sobra.
+
+        Vale para todo mundo menos o acompanhamento puro: dinheiro que
+        sobrou continua existindo, seja num envelope ou na conta corrente.
+        """
+        return self is not CategoryBehavior.TRACKING_ONLY
+
+    @property
     def is_monthly_budget(self) -> bool:
         """Se é orçamento de consumo que reinicia todo mês."""
         return self is CategoryBehavior.MONTHLY_SPENDING
@@ -192,6 +201,9 @@ class CategoryVersion(Base):
     counts_as_investment_capital: Mapped[bool] = mapped_column(default=False)
     #: Se o saldo desta categoria entra no patrimônio total.
     include_in_net_worth: Mapped[bool] = mapped_column(default=False)
+    #: Se a sobra atravessa o mês. Independente de exigir separação: o
+    #: "Livre" acumula sem que você precise transferir nada de banco.
+    accumulates_balance: Mapped[bool] = mapped_column(default=False)
     #: Campo do fechamento que informa o saldo real (em vez de calculá-lo).
     balance_from_closing: Mapped[ClosingField | None] = mapped_column(
         Enum(ClosingField, native_enum=False, length=20), default=None
@@ -387,6 +399,43 @@ class OpeningBalance(Base):
     )
     amount_cents: Mapped[int] = mapped_column(Integer, default=0)
     note: Mapped[str | None] = mapped_column(String(300), default=None)
+
+
+class Transfer(Base):
+    """Dinheiro que mudou de categoria.
+
+    Nasce de duas situações: um gasto estourou o disponível e outra
+    categoria cobriu a diferença, ou você decidiu mandar a sobra de um mês
+    para outro lugar. Nos dois casos é o mesmo movimento — sai de uma,
+    entra na outra — e por isso é uma linha só.
+    """
+
+    __tablename__ = "transfers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    month: Mapped[date] = mapped_column(Date, index=True)
+    from_category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), index=True
+    )
+    to_category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), index=True
+    )
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    #: Preenchido quando a transferência cobre um gasto: apagar o gasto
+    #: desfaz a cobertura junto, em vez de deixar dinheiro perdido.
+    expense_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expenses.id", ondelete="CASCADE"), default=None, index=True
+    )
+    note: Mapped[str | None] = mapped_column(String(200), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_transferencia_positiva"),
+        CheckConstraint(
+            "from_category_id <> to_category_id",
+            name="ck_transferencia_entre_diferentes",
+        ),
+    )
 
 
 class ImportLog(Base):

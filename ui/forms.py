@@ -17,7 +17,13 @@ from core.categories import CategoryView
 from core.database import session_scope
 from core.models import PaymentMethod
 from core.repositories import create_expense, update_expense
-from core.utils import month_label, month_start, to_cents, to_decimal
+from core.utils import (
+    month_label,
+    month_start,
+    split_installments,
+    to_cents,
+    to_decimal,
+)
 
 
 @dataclass(frozen=True)
@@ -169,7 +175,34 @@ def _campos_gasto(
     )
 
 
-def salvar_gasto(dados: DadosGasto, expense_id: int | None = None) -> list[tuple[date, int]]:
+def quanto_falta(dados: DadosGasto) -> int:
+    """Quanto este gasto passa do disponível da categoria, no primeiro mês.
+
+    Só a primeira parcela pesa agora; as seguintes cairão nos meses delas e
+    serão avaliadas quando aqueles meses chegarem.
+    """
+    from core import budget_service as budget
+
+    parcelas = split_installments(dados.total_cents, dados.installments_count)
+    nesta_vez = parcelas[0] if parcelas else dados.total_cents
+    mes = month_start(dados.first_installment_month)
+
+    with session_scope() as session:
+        vistas = {v.id: v for v in cat.resolve_all(session, mes)}
+        vista = vistas.get(dados.category_id)
+        if vista is None or not vista.accumulates:
+            return 0
+        disponivel = budget.saldo_categoria(session, vista, mes)
+    return max(0, nesta_vez - disponivel)
+
+
+def salvar_gasto(
+    dados: DadosGasto,
+    expense_id: int | None = None,
+    *,
+    cobrir_com: int | None = None,
+    cobrir_cents: int = 0,
+) -> list[tuple[date, int]]:
     """Grava o gasto e devolve as parcelas geradas.
 
     Ponto único de escrita de gastos: a Home e a página Gastos passam por
@@ -201,6 +234,20 @@ def salvar_gasto(dados: DadosGasto, expense_id: int | None = None) -> list[tuple
                 first_installment_month=dados.first_installment_month,
                 note=dados.note,
             )
+        if cobrir_com is not None and cobrir_cents > 0:
+            # A cobertura nasce junto com o gasto e aponta para ele: apagar
+            # o gasto desfaz a transferência, sem deixar dinheiro solto.
+            from core import budget_service as budget
+
+            budget.transferir(
+                session,
+                month=dados.first_installment_month,
+                origem_id=cobrir_com,
+                destino_id=dados.category_id,
+                valor_cents=cobrir_cents,
+                note=f"Cobertura de {dados.description}",
+                expense_id=gasto.id,
+            )
         return [(p.month, p.amount_cents) for p in gasto.installments]
 
 
@@ -218,6 +265,10 @@ def formulario_gasto(
     Usado tanto pelo atalho da Home (``compacto=True``) quanto pela página
     Gastos — mesmos campos, mesma validação, mesmo service.
     """
+    pendente = f"gasto_pendente_{prefixo}"
+    if pendente in st.session_state:
+        return _confirmar_cobertura(prefixo, pendente, mes_referencia)
+
     with st.form(f"form_gasto_{prefixo}", clear_on_submit=expense_id is None):
         dados, erro = _campos_gasto(
             prefixo, inicial=inicial, mes_referencia=mes_referencia, compacto=compacto
@@ -229,6 +280,15 @@ def formulario_gasto(
     if dados is None:
         st.error(erro)
         return False
+
+    # Um gasto que passa do disponível precisa vir de algum lugar. A
+    # pergunta não cabe dentro do formulário (o Streamlit só reexecuta
+    # depois do envio), então guardamos a intenção e perguntamos no passo
+    # seguinte.
+    falta = quanto_falta(dados) if expense_id is None else 0
+    if falta > 0:
+        st.session_state[pendente] = (dados, falta)
+        st.rerun()
 
     parcelas = salvar_gasto(dados, expense_id)
     if dados.installments_count > 1:
@@ -242,3 +302,32 @@ def formulario_gasto(
     else:
         st.success("Gasto registrado." if expense_id is None else "Gasto atualizado.")
     return True
+
+
+def _confirmar_cobertura(prefixo: str, chave: str, mes_referencia: date) -> bool:
+    """Segundo passo do gasto que estourou: de onde sai o dinheiro."""
+    from ui.transferencias import escolher_origem
+
+    dados, falta = st.session_state[chave]
+    with session_scope() as session:
+        vistas = {v.id: v for v in cat.resolve_all(session, dados.first_installment_month)}
+    categoria = vistas[dados.category_id]
+
+    st.markdown(f"**{dados.description}** · {month_label(dados.first_installment_month)}")
+    origem = escolher_origem(
+        categoria, falta, dados.first_installment_month, chave=f"{prefixo}_cobre"
+    )
+
+    confirmar, cancelar = st.columns(2)
+    if confirmar.button("Confirmar gasto", key=f"{prefixo}_confirma", type="primary"):
+        salvar_gasto(dados, cobrir_com=origem, cobrir_cents=falta if origem else 0)
+        del st.session_state[chave]
+        if origem is None:
+            st.toast("Gasto registrado. O saldo negativo segue para o mês seguinte.")
+        else:
+            st.toast(f"Gasto registrado, coberto por {vistas[origem].name}.", icon="✅")
+        st.rerun()
+    if cancelar.button("Cancelar", key=f"{prefixo}_cancela"):
+        del st.session_state[chave]
+        st.rerun()
+    return False

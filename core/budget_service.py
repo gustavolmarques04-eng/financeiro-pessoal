@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 
 from . import cache
 from . import categories as cat
+from . import ledger
 from . import repositories as repo
 from .categories import CategoryView
 from .models import CategoryBehavior, ClosingField
@@ -92,11 +93,22 @@ class GastoLinha:
     categoria: CategoryView
     orcamento_cents: int
     gasto_cents: int
+    #: Saldo herdado do mês anterior. Positivo se sobrou, negativo se
+    #: estourou — a sobra do mês passado é dinheiro deste mês.
+    vem_de_antes_cents: int = 0
+    #: Efeito das transferências no mês: recebeu de outra categoria, ou
+    #: cedeu para cobrir o estouro de outra.
+    transferido_cents: int = 0
 
     @property
     def disponivel_cents(self) -> int:
-        """Sobra do orçamento; negativo quando estourou."""
-        return self.orcamento_cents - self.gasto_cents
+        """Tudo que dá para gastar; negativo quando estourou."""
+        return (
+            self.vem_de_antes_cents
+            + self.orcamento_cents
+            + self.transferido_cents
+            - self.gasto_cents
+        )
 
     @property
     def estourou(self) -> bool:
@@ -308,59 +320,28 @@ def saldo_categoria(
 ) -> int:
     """Saldo de uma categoria no fim do mês.
 
-    Categorias sem ``balance_from_closing`` são puro envelope::
+    Vem do histórico mês a mês (:mod:`core.ledger`), que acumula::
 
-        saldo inicial + separações confirmadas − gastos da categoria
+        saldo do mês anterior + entradas - gastos +/- transferências
 
-    Categorias ligadas a um campo do fechamento (Reserva, Investimentos)
-    usam o valor informado como **checkpoint** e somam por cima o que veio
-    depois dele::
+    "Entrada" é o valor separado, para quem exige separação, ou a fatia do
+    rateio, para o orçamento de consumo — dinheiro que fica na conta
+    corrente sem você precisar mover nada. É o que faz a sobra do "Livre"
+    atravessar o mês em vez de evaporar.
 
-        saldo informado + separações feitas depois − gastos feitos depois
+    Categorias ligadas a um campo do fechamento usam o valor informado como
+    checkpoint: no mês em que você declara o saldo real, ele substitui o
+    acumulado, e só entra por cima o que foi registrado depois.
 
-    É o que faz "já separei R$ 502,82 para a Reserva" aparecer somado ao que
-    você já tinha guardado, sem contar duas vezes quando você informar o
-    novo saldo real no próximo fechamento.
-
-    Com ``incluir_o_mes=False`` as movimentações do próprio mês ficam de
-    fora. A regra da meta usa esse modo para o planejado não mudar enquanto
-    você confirma as separações daquele mês.
+    Com ``incluir_o_mes=False`` o resultado é o saldo no fim do mês
+    anterior. A regra da meta usa esse modo para o planejado não encolher
+    enquanto você confirma as separações do próprio mês.
     """
     alvo = month_start(month)
-    limite = alvo if incluir_o_mes else add_months(alvo, -1)
-
-    if vista.balance_from_closing is None:
-        inicial = repo.get_opening_balance(session, vista.id)
-        separado = repo.sum_allocations_until(session, limite, vista.id)
-        gasto = repo.sum_expenses_until(session, limite, vista.id)
-        return inicial + separado - gasto
-
-    fechamento = repo.latest_closing_until(session, alvo)
-    if fechamento is None:
-        base, checkpoint_mes, checkpoint_quando = (
-            repo.get_opening_balance(session, vista.id),
-            None,
-            None,
-        )
-    else:
-        base = fechamento.valor_de(vista.balance_from_closing)
-        checkpoint_mes, checkpoint_quando = fechamento.month, fechamento.updated_at
-
-    separado = sum(
-        estado.separated_cents
-        for estado in repo.list_allocations_until(session, limite, vista.id)
-        if _depois_do_checkpoint(
-            estado.month, estado.confirmed_at, checkpoint_mes, checkpoint_quando
-        )
-    )
-    gasto = sum(
-        parcela.amount_cents
-        for parcela, compra in repo.list_installments_until(session, limite, vista.id)
-        if _depois_do_checkpoint(
-            parcela.month, compra.created_at, checkpoint_mes, checkpoint_quando
-        )
-    )
-    return base + separado - gasto
+    historico = ledger.obter(session, alvo)
+    if incluir_o_mes:
+        return historico.saldo_em(alvo, vista.id)
+    return historico.do_mes(alvo, vista.id).inicial_cents
 
 
 def saldos_das_categorias(
@@ -387,6 +368,25 @@ def get_month_plan(session: Session, month: date) -> MonthPlan:
     return cache.obter(session, f"plano:{alvo}", lambda: _montar_plano(session, alvo))
 
 
+def _sobra_da_meta(
+    vistas: list[CategoryView],
+    historico: "ledger.Historico",
+    alvo: date,
+    base_cents: int,
+) -> int:
+    """Quanto o corte das metas redirecionou para outras categorias.
+
+    É a diferença entre a fatia crua do percentual e o que a categoria-meta
+    de fato recebeu — usada só para explicar o número na tela.
+    """
+    bruto = distribuir(base_cents, vistas)
+    return sum(
+        max(0, bruto.get(v.id, 0) - historico.orcado(alvo, v.id))
+        for v in vistas
+        if v.behavior is CategoryBehavior.ALLOCATION_GOAL and v.target_amount_cents
+    )
+
+
 def _montar_plano(session: Session, alvo: date) -> MonthPlan:
     """Calcula o plano do mês de fato, sem passar pelo cache."""
     periodo = Period.of_month(alvo)
@@ -397,15 +397,12 @@ def _montar_plano(session: Session, alvo: date) -> MonthPlan:
     base = repo.sum_incomes(session, periodo, only_budget=True)
     gasto_total = repo.sum_expenses(session, periodo)
 
-    bruto = distribuir(base, vistas)
-    # O saldo de referência da meta ignora as separações do próprio mês:
-    # sem isso, confirmar a separação encolheria o planejado no mesmo passo.
-    saldos = {
-        v.id: saldo_categoria(session, v, alvo, incluir_o_mes=False)
-        for v in vistas
-        if v.target_amount_cents is not None
-    }
-    planejado, sobra = aplicar_regras_de_meta(bruto, vistas, saldos)
+    # O rateio, com a regra da meta já aplicada, vem do histórico: é o
+    # mesmo cálculo que produz os saldos, então o plano da tela e o saldo
+    # acumulado não têm como discordar.
+    historico = ledger.obter(session, alvo)
+    planejado = historico.planejado_do_mes(alvo)
+    sobra = _sobra_da_meta(vistas, historico, alvo, base)
 
     separacoes: list[SeparacaoLinha] = []
     for vista in vistas:
@@ -431,6 +428,8 @@ def _montar_plano(session: Session, alvo: date) -> MonthPlan:
             categoria=vista,
             orcamento_cents=planejado.get(vista.id, 0),
             gasto_cents=repo.sum_expenses(session, periodo, category_id=vista.id),
+            vem_de_antes_cents=historico.do_mes(alvo, vista.id).inicial_cents,
+            transferido_cents=historico.do_mes(alvo, vista.id).transferencia_cents,
         )
         for vista in vistas
         if vista.is_monthly_budget and vista.active
@@ -548,7 +547,13 @@ def ajustar_separacao(
 def envelopes(session: Session, period: Period) -> list[EnvelopeLinha]:
     """Saldo acumulado de cada envelope no fim do período."""
     fim = period.end
-    vistas = [v for v in cat.resolve_active(session, fim) if v.accumulates]
+    # A seção é dos envelopes de gasto acumulativo. Consumo mensal também
+    # guarda a sobra, mas aparece no orçamento do mês com a linha do que
+    # veio de trás; reserva e investimentos aparecem no patrimônio. Repetir
+    # qualquer um deles aqui mostraria o mesmo dinheiro duas vezes.
+    vistas = [
+        v for v in cat.resolve_active(session, fim) if v.behavior.accumulates
+    ]
     return [
         EnvelopeLinha(
             categoria=vista,
@@ -697,24 +702,14 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
 
 
 def disponivel_no_mes(session: Session, month: date) -> int:
-    """O que sobrou do orçamento de consumo do mês.
+    """O que dá para gastar nas categorias de consumo, no mês em foco.
 
-    Categorias de gasto mensal recebem uma fatia da renda e não acumulam:
-    o que não foi gasto ainda está na conta, mas some do cálculo quando o
-    mês vira. Por isso este número é sempre do mês em foco, nunca somado
-    entre meses.
-
-    Fica negativo se você gastou mais do que o planejado — o que é a
-    verdade: o dinheiro saiu de outro lugar.
+    Já inclui o que veio dos meses anteriores: a sobra do orçamento não
+    evapora na virada, e um estouro segue como saldo negativo até ser
+    coberto.
     """
-    alvo = month_start(month)
-    plano = get_month_plan(session, alvo)
-    gastos = repo.expenses_by_category(session, Period.of_month(alvo))
-    return sum(
-        plano.planejado.get(v.id, 0) - gastos.get(v.id, 0)
-        for v in plano.categorias
-        if v.behavior.is_monthly_budget
-    )
+    plano = get_month_plan(session, month_start(month))
+    return sum(linha.disponivel_cents for linha in plano.gastos)
 
 
 def serie_patrimonio(session: Session, meses: list[date]) -> list[tuple[date, int]]:
@@ -767,3 +762,75 @@ def get_resumo_periodo(session: Session, period: Period) -> ResumoPeriodo:
         patrimonio=patrimonio,
         disponivel_cents=disponivel_no_mes(session, patrimonio.posicao),
     )
+
+
+# --------------------------------------------------------------------------
+# Transferências entre categorias
+# --------------------------------------------------------------------------
+class TransferenciaInvalida(Exception):
+    """Pedido de transferência que não faz sentido."""
+
+
+def transferir(
+    session: Session,
+    *,
+    month: date,
+    origem_id: int,
+    destino_id: int,
+    valor_cents: int,
+    note: str | None = None,
+    expense_id: int | None = None,
+) -> None:
+    """Move dinheiro de uma categoria para outra, no mês indicado.
+
+    Serve para os dois casos que existem: enviar a sobra de um envelope
+    para outro, e cobrir um gasto que estourou o disponível. Nos dois o
+    movimento é o mesmo, e o saldo das duas categorias muda na hora.
+
+    A transferência é definitiva: não fica registrado nenhum "empréstimo" a
+    devolver, porque o dinheiro realmente saiu de um lugar e foi para o
+    outro.
+    """
+    if valor_cents <= 0:
+        raise TransferenciaInvalida("O valor precisa ser maior que zero.")
+    if origem_id == destino_id:
+        raise TransferenciaInvalida("Escolha uma categoria de destino diferente.")
+
+    alvo = month_start(month)
+    vistas = {v.id: v for v in cat.resolve_all(session, alvo)}
+    origem, destino = vistas.get(origem_id), vistas.get(destino_id)
+    if origem is None or destino is None:
+        raise TransferenciaInvalida("Categoria não encontrada neste mês.")
+    if not destino.accumulates and not destino.is_monthly_budget:
+        raise TransferenciaInvalida(
+            f"{destino.name} não guarda saldo, então não pode receber dinheiro."
+        )
+
+    repo.criar_transferencia(
+        session,
+        month=alvo,
+        from_category_id=origem_id,
+        to_category_id=destino_id,
+        amount_cents=valor_cents,
+        expense_id=expense_id,
+        note=note,
+    )
+
+
+def fontes_para_cobrir(
+    session: Session, month: date, excluindo: int, minimo_cents: int = 1
+) -> list[tuple[CategoryView, int]]:
+    """Categorias com saldo suficiente para cobrir um estouro.
+
+    Devolve pares ``(categoria, saldo)`` em ordem decrescente de saldo: as
+    que têm mais folga aparecem primeiro.
+    """
+    alvo = month_start(month)
+    candidatas = [
+        (v, saldo_categoria(session, v, alvo))
+        for v in cat.resolve_active(session, alvo)
+        if v.id != excluindo and v.accumulates
+    ]
+    disponiveis = [(v, s) for v, s in candidatas if s >= minimo_cents]
+    disponiveis.sort(key=lambda par: par[1], reverse=True)
+    return disponiveis

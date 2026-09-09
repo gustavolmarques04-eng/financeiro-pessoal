@@ -15,6 +15,7 @@ from core import repositories as repo
 from core.database import session_scope
 from core.utils import month_label, month_short
 from ui.forms import formulario_gasto
+from ui.transferencias import botao_enviar_sobra
 from ui.money import chart_hover, chart_values
 from ui.shared import (
     NAVY,
@@ -166,14 +167,24 @@ else:
         with colunas[indice % len(colunas)]:
             with st.container(border=True):
                 st.markdown(f"**{item.categoria.label}**")
-                st.markdown(
-                    linha("Orçado", dinheiro_html(item.orcamento_cents))
-                    + linha("Gasto", dinheiro_html(item.gasto_cents))
-                    + linha("Disponível", valor_colorido(item.disponivel_cents)),
-                    unsafe_allow_html=True,
-                )
+                corpo = ""
+                if item.vem_de_antes_cents:
+                    corpo += linha(
+                        "Veio do mês anterior", valor_colorido(item.vem_de_antes_cents)
+                    )
+                corpo += linha("Orçado", dinheiro_html(item.orcamento_cents))
+                if item.transferido_cents:
+                    corpo += linha(
+                        "Transferências", valor_colorido(item.transferido_cents)
+                    )
+                corpo += linha("Gasto", dinheiro_html(item.gasto_cents))
+                corpo += linha("Disponível", valor_colorido(item.disponivel_cents))
+                st.markdown(corpo, unsafe_allow_html=True)
+                if item.disponivel_cents > 0:
+                    botao_enviar_sobra(item.categoria, item.disponivel_cents, mes_ref)
     st.caption(
-        f"Orçamento de {month_label(plano.month)}. Estas categorias não acumulam."
+        f"Orçamento de {month_label(plano.month)}. A sobra atravessa o mês: "
+        "o que não foi gasto continua seu."
     )
 
 subtitulo("Saldos acumulados")

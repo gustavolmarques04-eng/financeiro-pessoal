@@ -17,6 +17,7 @@ from . import cache
 from . import categories as cat
 from .models import (
     AllocationState,
+    Category,
     CategoryVersion,
     Expense,
     ExpenseInstallment,
@@ -26,6 +27,7 @@ from .models import (
     MonthRevision,
     OpeningBalance,
     PaymentMethod,
+    Transfer,
 )
 from .period import Period
 from .utils import add_months, month_start, split_installments
@@ -547,6 +549,11 @@ def _fechamentos_em_cache(session: Session) -> list[MonthlyClosing]:
     )
 
 
+def fechamentos(session: Session) -> list[MonthlyClosing]:
+    """Todos os fechamentos informados, do mais antigo para o mais novo."""
+    return _fechamentos_em_cache(session)
+
+
 def get_closing(session: Session, month: date) -> MonthlyClosing | None:
     """Fechamento informado para o mês, se existir."""
     alvo = month_start(month)
@@ -700,3 +707,169 @@ def upsert_settings_version(
                 cat.upsert_version(
                     session, vista.id, alvo, target_amount_cents=meta_reserva_cents
                 )
+
+
+# --------------------------------------------------------------------------
+# Leituras em lote para o histórico mês a mês
+# --------------------------------------------------------------------------
+def base_por_mes(session: Session) -> dict[date, int]:
+    """Base de distribuição de cada mês, do começo dos registros até hoje.
+
+    Uma consulta só. O histórico precisa do orçado de todos os meses, e
+    perguntar mês a mês faria o custo crescer para sempre.
+    """
+
+    def calcular() -> dict[date, int]:
+        consulta = (
+            select(Income.month, func.sum(Income.amount_cents))
+            .where(Income.counts_in_budget.is_(True))
+            .group_by(Income.month)
+        )
+        return {mes: int(total or 0) for mes, total in session.execute(consulta)}
+
+    return cache.obter(session, "base_por_mes", calcular)
+
+
+def gastos_por_mes_e_categoria(session: Session) -> dict[tuple[date, int], int]:
+    """Gasto de cada categoria em cada mês, somando parcelas."""
+
+    def calcular() -> dict[tuple[date, int], int]:
+        consulta = (
+            select(
+                ExpenseInstallment.month,
+                Expense.category_id,
+                func.sum(ExpenseInstallment.amount_cents),
+            )
+            .join(Expense, ExpenseInstallment.expense_id == Expense.id)
+            .group_by(ExpenseInstallment.month, Expense.category_id)
+        )
+        return {
+            (mes, cid): int(total or 0) for mes, cid, total in session.execute(consulta)
+        }
+
+    return cache.obter(session, "gastos_por_mes_categoria", calcular)
+
+
+def separacoes_por_mes_e_categoria(session: Session) -> dict[tuple[date, int], int]:
+    """Valor separado de cada categoria em cada mês."""
+
+    def calcular() -> dict[tuple[date, int], int]:
+        consulta = select(
+            AllocationState.month,
+            AllocationState.category_id,
+            AllocationState.separated_cents,
+        )
+        return {
+            (mes, cid): int(valor or 0) for mes, cid, valor in session.execute(consulta)
+        }
+
+    return cache.obter(session, "separacoes_por_mes_categoria", calcular)
+
+
+def separacoes_com_hora(
+    session: Session,
+) -> dict[tuple[date, int], datetime | None]:
+    """Quando cada separação foi confirmada.
+
+    O histórico compara essa hora com a do fechamento para saber se o
+    dinheiro já está dentro do saldo declarado ou entrou por cima.
+    """
+
+    def calcular() -> dict[tuple[date, int], datetime | None]:
+        consulta = select(
+            AllocationState.month,
+            AllocationState.category_id,
+            AllocationState.confirmed_at,
+        )
+        return {(mes, cid): quando for mes, cid, quando in session.execute(consulta)}
+
+    return cache.obter(session, "separacoes_com_hora", calcular)
+
+
+def transferencias_por_mes_e_categoria(
+    session: Session,
+) -> dict[tuple[date, int], int]:
+    """Efeito líquido das transferências em cada categoria e mês.
+
+    Positivo para quem recebeu, negativo para quem cedeu.
+    """
+
+    def calcular() -> dict[tuple[date, int], int]:
+        efeito: dict[tuple[date, int], int] = {}
+        linhas = session.execute(
+            select(
+                Transfer.month,
+                Transfer.from_category_id,
+                Transfer.to_category_id,
+                Transfer.amount_cents,
+            )
+        )
+        for mes, origem, destino, valor in linhas:
+            efeito[(mes, origem)] = efeito.get((mes, origem), 0) - int(valor)
+            efeito[(mes, destino)] = efeito.get((mes, destino), 0) + int(valor)
+        return efeito
+
+    return cache.obter(session, "transferencias_por_mes_categoria", calcular)
+
+
+def saldos_iniciais(session: Session) -> dict[int, int]:
+    """Saldo inicial de cada categoria, numa consulta só."""
+
+    def calcular() -> dict[int, int]:
+        return {
+            cid: int(valor or 0)
+            for cid, valor in session.execute(
+                select(OpeningBalance.category_id, OpeningBalance.amount_cents)
+            )
+        }
+
+    return cache.obter(session, "saldos_iniciais", calcular)
+
+
+def criar_transferencia(
+    session: Session,
+    *,
+    month: date,
+    from_category_id: int,
+    to_category_id: int,
+    amount_cents: int,
+    expense_id: int | None = None,
+    note: str | None = None,
+) -> Transfer:
+    """Registra dinheiro mudando de categoria."""
+    if amount_cents <= 0:
+        raise ValueError("A transferência precisa de um valor positivo.")
+    if from_category_id == to_category_id:
+        raise ValueError("Origem e destino precisam ser categorias diferentes.")
+    transferencia = Transfer(
+        month=month_start(month),
+        from_category_id=from_category_id,
+        to_category_id=to_category_id,
+        amount_cents=amount_cents,
+        expense_id=expense_id,
+        note=note,
+    )
+    session.add(transferencia)
+    session.flush()
+    cache.limpar(session)
+    return transferencia
+
+
+def list_transferencias(session: Session, period: Period) -> list[Transfer]:
+    """Transferências do período, das mais recentes para as mais antigas."""
+    return list(
+        session.scalars(
+            select(Transfer)
+            .where(Transfer.month.in_(period.months))
+            .order_by(Transfer.created_at.desc())
+        )
+    )
+
+
+def excluir_transferencia(session: Session, transfer_id: int) -> None:
+    """Desfaz uma transferência."""
+    transferencia = session.get(Transfer, transfer_id)
+    if transferencia is not None:
+        session.delete(transferencia)
+        session.flush()
+        cache.limpar(session)

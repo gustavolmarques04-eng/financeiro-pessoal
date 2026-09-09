@@ -64,6 +64,7 @@ class CategoryView:
     counts_as_investment_capital: bool
     include_in_net_worth: bool
     balance_from_closing: ClosingField | None
+    accumulates_balance: bool = False
 
     @property
     def label(self) -> str:
@@ -77,8 +78,12 @@ class CategoryView:
 
     @property
     def accumulates(self) -> bool:
-        """Se o saldo passa de um mês para o outro."""
-        return self.behavior.accumulates
+        """Se o saldo passa de um mês para o outro.
+
+        É escolha da categoria, não consequência do comportamento: o
+        "Livre" acumula a sobra sem exigir que você separe nada.
+        """
+        return self.accumulates_balance
 
     @property
     def is_monthly_budget(self) -> bool:
@@ -134,6 +139,12 @@ def seed_categories(session: Session) -> None:
                     dados.get("counts_as_investment_capital", False)
                 ),
                 include_in_net_worth=bool(dados.get("include_in_net_worth", False)),
+                accumulates_balance=bool(
+                    dados.get(
+                        "accumulates_balance",
+                        dados["behavior"].acumula_por_padrao,  # type: ignore[union-attr]
+                    )
+                ),
                 balance_from_closing=dados.get("balance_from_closing"),  # type: ignore[arg-type]
             )
         )
@@ -169,6 +180,7 @@ def _to_view(versao: CategoryVersion, slug: str, mes: date) -> CategoryView:
         counts_as_investment_capital=versao.counts_as_investment_capital,
         include_in_net_worth=versao.include_in_net_worth,
         balance_from_closing=versao.balance_from_closing,
+        accumulates_balance=versao.accumulates_balance,
     )
 
 
@@ -186,14 +198,34 @@ def resolve_all(session: Session, month: date) -> list[CategoryView]:
     return cache.obter(session, f"categorias:{alvo}", lambda: _resolver(session, alvo))
 
 
+def todas_as_versoes(session: Session) -> list[tuple[str, CategoryVersion]]:
+    """Todas as versões de todas as categorias, em ordem de vigência.
+
+    São poucas linhas — uma por edição de categoria — e o histórico mês a
+    mês precisa resolver as categorias de dezenas de meses. Lendo tudo uma
+    vez, resolver qualquer mês passa a custar zero consultas.
+    """
+    return cache.obter(
+        session,
+        "versoes",
+        lambda: [
+            (slug, versao)
+            for slug, versao in session.execute(
+                select(Category.slug, CategoryVersion)
+                .join(CategoryVersion, CategoryVersion.category_id == Category.id)
+                .order_by(CategoryVersion.effective_month, CategoryVersion.id)
+            )
+        ],
+    )
+
+
 def _resolver(session: Session, alvo: date) -> list[CategoryView]:
-    """Lê todas as versões vigentes de uma vez e escolhe a última de cada."""
-    linhas = session.execute(
-        select(Category.slug, CategoryVersion)
-        .join(CategoryVersion, CategoryVersion.category_id == Category.id)
-        .where(CategoryVersion.effective_month <= alvo)
-        .order_by(CategoryVersion.effective_month, CategoryVersion.id)
-    ).all()
+    """Escolhe, para cada categoria, a última versão que já valia no mês."""
+    linhas = [
+        (slug, versao)
+        for slug, versao in todas_as_versoes(session)
+        if versao.effective_month <= alvo
+    ]
 
     # Em ordem crescente de vigência, a última versão lida de cada categoria
     # é justamente a que vale no mês pedido.
@@ -330,6 +362,7 @@ def _copiar_versao(base: CategoryVersion, effective_month: date) -> CategoryVers
         counts_as_investment_capital=base.counts_as_investment_capital,
         include_in_net_worth=base.include_in_net_worth,
         balance_from_closing=base.balance_from_closing,
+        accumulates_balance=base.accumulates_balance,
     )
 
 
@@ -389,6 +422,7 @@ def criar_categoria(
     overflow_target_category_id: int | None = None,
     counts_as_investment_capital: bool = False,
     include_in_net_worth: bool | None = None,
+    accumulates_balance: bool | None = None,
 ) -> Category:
     """Cria uma categoria valendo a partir de um mês.
 
@@ -429,6 +463,11 @@ def criar_categoria(
         counts_as_investment_capital=counts_as_investment_capital,
         include_in_net_worth=(
             behavior.accumulates if include_in_net_worth is None else include_in_net_worth
+        ),
+        accumulates_balance=(
+            behavior.acumula_por_padrao
+            if accumulates_balance is None
+            else accumulates_balance
         ),
     )
     return categoria

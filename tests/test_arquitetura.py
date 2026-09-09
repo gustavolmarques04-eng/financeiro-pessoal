@@ -275,3 +275,63 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
         f"um render do dashboard fez {len(consultas)} consultas; "
         "algo voltou a consultar por categoria ou recalcular o plano"
     )
+
+
+def test_custo_por_clique_nao_cresce_com_o_historico() -> None:
+    """Dez anos de uso têm de custar o mesmo que o primeiro mês.
+
+    O saldo de hoje depende de todos os meses anteriores. Se cada mês
+    custasse uma ida ao banco, o app ficaria mais lento a cada mês usado —
+    exatamente o problema que o histórico em memória existe para evitar.
+    """
+    import sys
+    from datetime import date
+
+    sys.path.insert(0, str(RAIZ))
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+
+    from core import budget_service as budget
+    from core import repositories as repo
+    from core.database import seed_defaults
+    from core.models import Base, IncomeType
+    from core.period import Period
+    from core.utils import add_months
+
+    def medir(meses: int) -> int:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        fabrica = sessionmaker(bind=engine)
+        inicio = date(2026, 9, 1)
+        with fabrica() as preparo:
+            seed_defaults(preparo)
+            for i in range(meses):
+                repo.create_income(
+                    preparo,
+                    on=add_months(inicio, -i),
+                    amount_cents=295775,
+                    type_=IncomeType.SALARIO,
+                    description="salário",
+                )
+            preparo.commit()
+
+        consultas: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _contar(conn, cursor, stmt, params, ctx, many):  # type: ignore[no-untyped-def]
+            consultas.append(stmt)
+
+        with fabrica() as session:
+            budget.get_resumo_periodo(session, Period.of_month(inicio))
+            budget.get_month_plan(session, inicio)
+
+        engine.dispose()
+        return len(consultas)
+
+    um_mes = medir(1)
+    dez_anos = medir(120)
+
+    assert dez_anos == um_mes, (
+        f"um mês de histórico custa {um_mes} consultas e dez anos custam "
+        f"{dez_anos}: o cálculo voltou a perguntar ao banco mês a mês"
+    )
