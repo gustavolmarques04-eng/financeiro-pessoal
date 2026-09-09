@@ -246,6 +246,9 @@ def main() -> int:
     print("\nCOPIANDO")
     copiadas = copiar(args.origem, args.destino)
 
+    for linha in ajustar_sequencias(args.destino):
+        print(f"  sequencia: {linha}")
+
     destino = create_engine(args.destino)
     try:
         contagens_finais = resumo(destino, "DESTINO (depois)")
