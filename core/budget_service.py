@@ -696,6 +696,27 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
     )
 
 
+def disponivel_no_mes(session: Session, month: date) -> int:
+    """O que sobrou do orçamento de consumo do mês.
+
+    Categorias de gasto mensal recebem uma fatia da renda e não acumulam:
+    o que não foi gasto ainda está na conta, mas some do cálculo quando o
+    mês vira. Por isso este número é sempre do mês em foco, nunca somado
+    entre meses.
+
+    Fica negativo se você gastou mais do que o planejado — o que é a
+    verdade: o dinheiro saiu de outro lugar.
+    """
+    alvo = month_start(month)
+    plano = get_month_plan(session, alvo)
+    gastos = repo.expenses_by_category(session, Period.of_month(alvo))
+    return sum(
+        plano.planejado.get(v.id, 0) - gastos.get(v.id, 0)
+        for v in plano.categorias
+        if v.behavior.is_monthly_budget
+    )
+
+
 def serie_patrimonio(session: Session, meses: list[date]) -> list[tuple[date, int]]:
     """Evolução do patrimônio acompanhado, mês a mês."""
     return [
@@ -716,6 +737,18 @@ class ResumoPeriodo:
     gasto_cents: int
     dividendos_cents: int
     patrimonio: Patrimonio
+    #: Sobra do orçamento de consumo na posição do patrimônio.
+    disponivel_cents: int = 0
+
+    @property
+    def dinheiro_total_cents(self) -> int:
+        """Todo o dinheiro que o app consegue enxergar.
+
+        É o guardado nas separações mais o que ainda não foi gasto do
+        orçamento do mês. Não conhece o extrato do banco: só o que foi
+        registrado aqui.
+        """
+        return self.patrimonio.guardado_cents + self.disponivel_cents
 
 
 def get_resumo_periodo(session: Session, period: Period) -> ResumoPeriodo:
@@ -724,11 +757,13 @@ def get_resumo_periodo(session: Session, period: Period) -> ResumoPeriodo:
     Receitas, gastos e dividendos somam os meses. Patrimônio **não** soma:
     é a posição mais recente disponível.
     """
+    patrimonio = get_patrimonio(session, period)
     return ResumoPeriodo(
         period=period,
         recebido_cents=repo.sum_incomes(session, period, only_renda=True),
         base_cents=repo.sum_incomes(session, period, only_budget=True),
         gasto_cents=repo.sum_expenses(session, period),
         dividendos_cents=repo.sum_dividends(session, period),
-        patrimonio=get_patrimonio(session, period),
+        patrimonio=patrimonio,
+        disponivel_cents=disponivel_no_mes(session, patrimonio.posicao),
     )

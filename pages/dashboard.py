@@ -81,11 +81,9 @@ elif resumo.patrimonio.fechamento_desatualizado:
     )
 else:
     apoio_patrimonio = f"posição de {month_label(resumo.patrimonio.posicao)}"
-comprometido = resumo.patrimonio.comprometido_cents
-apoio_guardado = (
-    f"{dinheiro(comprometido)} com destino certo"
-    if comprometido
-    else "tudo conta como patrimônio"
+apoio_total = (
+    f"{dinheiro(resumo.patrimonio.guardado_cents)} guardado"
+    f" + {dinheiro(resumo.disponivel_cents)} livre no mês"
 )
 apoio_resultado = (
     percentual(resumo_inv.rentabilidade_pct) + " sobre o capital"
@@ -105,9 +103,9 @@ mostrar_cartoes(
         ),
         ("Gasto", dinheiro(resumo.gasto_cents), periodo.label, ""),
         (
-            "Dinheiro guardado",
-            dinheiro(resumo.patrimonio.guardado_cents),
-            apoio_guardado,
+            "Todo o dinheiro",
+            dinheiro(resumo.dinheiro_total_cents),
+            apoio_total,
             "",
         ),
         ("Patrimônio", dinheiro(resumo.patrimonio.total_cents), apoio_patrimonio, ""),

@@ -410,3 +410,61 @@ def test_gasto_em_categoria_de_consumo_nao_mexe_no_guardado(
 
     assert depois.guardado_cents == antes.guardado_cents
     assert depois.total_cents == antes.total_cents
+
+
+# --------------------------------------------------------------------------
+# Todo o dinheiro (guardado + sobra do orçamento do mês)
+# --------------------------------------------------------------------------
+def test_gasto_no_orcamento_mensal_reduz_o_dinheiro_total(
+    session: Session, receita, gasto, cats
+) -> None:
+    """Gastar do orçamento do mês tem de aparecer no total.
+
+    Era o furo: "Livre" não separa dinheiro, então ficava fora do guardado
+    e gastar dele não mexia em número nenhum.
+    """
+    receita(2952.21, mes=SETEMBRO)
+    antes = budget.get_resumo_periodo(session, mes(SETEMBRO))
+
+    gasto(85.10, cats["livre"], mes=SETEMBRO)
+    depois = budget.get_resumo_periodo(session, mes(SETEMBRO))
+
+    assert depois.dinheiro_total_cents == antes.dinheiro_total_cents - to_cents(85.10)
+    assert depois.patrimonio.guardado_cents == antes.patrimonio.guardado_cents, (
+        "gasto de consumo não sai do dinheiro separado"
+    )
+
+
+def test_dinheiro_total_e_guardado_mais_disponivel(
+    session: Session, receita, cats
+) -> None:
+    """O total é a soma exata das duas partes que a Home mostra."""
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+
+    resumo = budget.get_resumo_periodo(session, mes(SETEMBRO))
+
+    assert resumo.dinheiro_total_cents == (
+        resumo.patrimonio.guardado_cents + resumo.disponivel_cents
+    )
+
+
+def test_disponivel_nao_soma_categorias_que_acumulam(
+    session: Session, receita, cats
+) -> None:
+    """A sobra do mês olha só o orçamento de consumo, senão conta duas vezes."""
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+
+    disponivel = budget.disponivel_no_mes(session, SETEMBRO)
+    guardado = budget.get_patrimonio(session, mes(SETEMBRO)).guardado_cents
+
+    assert disponivel > 0
+    assert disponivel + guardado <= to_cents(2952.21) + guardado, "sem inventar dinheiro"
+    plano = budget.get_month_plan(session, SETEMBRO)
+    consumo = sum(
+        plano.planejado.get(v.id, 0)
+        for v in plano.categorias
+        if v.behavior.is_monthly_budget
+    )
+    assert disponivel == consumo, "nada foi gasto ainda"
