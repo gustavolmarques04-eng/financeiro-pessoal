@@ -20,7 +20,8 @@ RAIZ = Path(__file__).resolve().parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from core.database import init_db  # noqa: E402
+from core import profile_service  # noqa: E402
+from core.database import init_db, session_scope  # noqa: E402
 from ui.login import require_auth, sair  # noqa: E402
 from ui.shared import CSS  # noqa: E402
 
@@ -36,6 +37,17 @@ def main() -> None:
     usuario = require_auth()
 
     init_db()
+
+    # Enquanto o primeiro acesso não termina, não existe navegação: o app
+    # não tem nada a mostrar, porque o usuário ainda não disse como quer
+    # dividir o dinheiro dele.
+    with session_scope() as session:
+        falta_configurar = profile_service.precisa_de_onboarding(session)
+    if falta_configurar:
+        st.navigation(
+            [st.Page("pages/primeiro_acesso.py", title="Primeiro acesso", icon="👋")]
+        ).run()
+        return
 
     paginas = [
         st.Page("pages/dashboard.py", title="Início", icon="🏠", default=True),

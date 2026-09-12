@@ -247,7 +247,18 @@ def _criar_restantes(conn) -> None:
 # Semeadura e conversão
 # --------------------------------------------------------------------------
 def _semear_categorias(conn) -> dict[str, int]:
-    """Insere as categorias-semente e devolve ``slug -> id``."""
+    """Insere as categorias-semente e devolve ``slug -> id``.
+
+    Num banco que já nasce multiusuário (migração 0003) não há semente a
+    inserir: cada pessoa monta as categorias dela no primeiro acesso, e uma
+    linha sem dono nem caberia na tabela. Nesse caso, sai sem fazer nada.
+    """
+    colunas_da_tabela = {
+        coluna["name"] for coluna in sa.inspect(conn).get_columns("categories")
+    }
+    if "user_id" in colunas_da_tabela:
+        return {}
+
     ids: dict[str, int] = {
         slug: cid
         for slug, cid in conn.execute(sa.text("SELECT slug, id FROM categories")).all()
@@ -430,7 +441,10 @@ def upgrade() -> None:
     if banco_novo:
         _criar_restantes(conn)
         ids = _semear_categorias(conn)
-        _versoes_do_plano(conn, ids)
+        # Sem sementes não há versões a criar: é o caso do banco que já
+        # nasce multiusuário, onde as categorias vêm do primeiro acesso.
+        if ids:
+            _versoes_do_plano(conn, ids)
         return
 
     _criar_categorias(conn)

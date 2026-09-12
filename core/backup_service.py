@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,8 @@ def _serializar(valor: Any) -> Any:
     """Converte tipos do banco para algo que o JSON aceite."""
     if isinstance(valor, (datetime, date)):
         return valor.isoformat()
+    if isinstance(valor, uuid.UUID):
+        return str(valor)
     if hasattr(valor, "value"):
         return valor.value
     return valor

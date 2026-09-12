@@ -37,6 +37,15 @@ CONSUMO = "MONTHLY_SPENDING"
 
 
 def upgrade() -> None:
+    inspetor = sa.inspect(op.get_bind())
+    colunas = {c["name"] for c in inspetor.get_columns("category_versions")}
+    # Num banco criado já com o modelo atual, a coluna nasce junto com a
+    # tabela: tentar adicioná-la de novo faria o batch do SQLite reordenar
+    # colunas e cair em dependência circular.
+    if "accumulates_balance" in colunas:
+        _criar_transferencias_se_faltar(inspetor)
+        return
+
     with op.batch_alter_table("category_versions") as batch:
         batch.add_column(
             sa.Column(
@@ -57,6 +66,9 @@ def upgrade() -> None:
         .where(versoes.c.behavior.in_((*JA_ACUMULAVAM, CONSUMO)))
         .values(accumulates_balance=sa.true())
     )
+
+    if "transfers" in inspetor.get_table_names():
+        return
 
     op.create_table(
         "transfers",
@@ -93,6 +105,14 @@ def upgrade() -> None:
             "from_category_id <> to_category_id", name="ck_transferencia_entre_diferentes"
         ),
     )
+
+
+def _criar_transferencias_se_faltar(inspetor) -> None:
+    """Garante a tabela de transferências num banco que já tinha a coluna."""
+    if "transfers" in inspetor.get_table_names():
+        return
+    if "category_transfers" in inspetor.get_table_names():
+        return  # já está no formato da 0003
 
 
 def downgrade() -> None:

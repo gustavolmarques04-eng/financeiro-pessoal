@@ -72,6 +72,34 @@ def session(tmp_path: Path, usuario: auth.Usuario) -> Session:
 
 
 @pytest.fixture()
+def session_vazia(tmp_path: Path, usuario: auth.Usuario) -> Session:
+    """Sessão sem categoria nenhuma, como um usuário recém-criado.
+
+    O aplicativo não semeia mais categorias: elas nascem no primeiro
+    acesso. Esta fixture reproduz esse estado.
+    """
+    auth.definir_atual(usuario)
+    caminho = tmp_path / "vazio.db"
+    engine = create_engine(f"sqlite:///{caminho.as_posix()}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_connection, _record):  # type: ignore[no-untyped-def]
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    fabrica = sessionmaker(bind=engine, expire_on_commit=False)
+    sessao = fabrica()
+    try:
+        yield sessao
+    finally:
+        sessao.close()
+        engine.dispose()
+        auth.definir_atual(None)
+
+
+@pytest.fixture()
 def cats(session: Session) -> dict[str, int]:
     """Mapa ``slug -> category_id`` das categorias iniciais.
 
