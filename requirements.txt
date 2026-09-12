@@ -8,3 +8,7 @@ pandas>=2.2
 python-dotenv==1.2.3
 openpyxl==3.1.5
 psycopg[binary]==3.3.5
+# O par supabase/supabase-auth precisa ser da mesma versão:
+# a 2.31 do auth removeu um módulo que a 2.22 do cliente ainda importa.
+supabase==2.22.0
+supabase-auth==2.22.0
