@@ -153,6 +153,14 @@ def url_para_alembic(url: str) -> str:
     return url.replace("%", "%%")
 
 
+def _engine_administrativo(url: str) -> Engine:
+    """Engine descartável para trabalho de esquema."""
+    kwargs: dict[str, object] = {}
+    if url.startswith("postgresql"):
+        kwargs["connect_args"] = {"prepare_threshold": None}
+    return create_engine(url, **kwargs)  # type: ignore[arg-type]
+
+
 def run_migrations(engine: Engine | None = None) -> None:
     """Leva o banco até a última migração do Alembic.
 
@@ -164,10 +172,13 @@ def run_migrations(engine: Engine | None = None) -> None:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
 
-    eng = engine or get_engine()
+    # Migração mexe no esquema, e a role do aplicativo não pode fazer isso.
+    # Quando existe uma URL administrativa, é ela que roda aqui.
+    url_admin = settings.admin_database_url() or database_url()
+    eng = engine or _engine_administrativo(url_admin)
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url_para_alembic(database_url()))
+    config.set_main_option("sqlalchemy.url", url_para_alembic(url_admin))
     config.attributes["connection"] = None
 
     with eng.connect() as conexao:
@@ -192,8 +203,20 @@ def init_db(engine: Engine | None = None, *, forcar: bool = False) -> Engine:
     if _esquema_pronto and not forcar and engine is None:
         return eng
 
-    run_migrations(eng)
-    Base.metadata.create_all(eng, checkfirst=True)
+    # O esquema é trabalho administrativo: quando o aplicativo conecta com a
+    # role sem privilégio, quem cria e altera tabelas é outra conexão.
+    if engine is None:
+        run_migrations()
+        administrativo = _engine_administrativo(
+            settings.admin_database_url() or database_url()
+        )
+        try:
+            Base.metadata.create_all(administrativo, checkfirst=True)
+        finally:
+            administrativo.dispose()
+    else:
+        run_migrations(eng)
+        Base.metadata.create_all(eng, checkfirst=True)
     # Nenhuma categoria nasce sozinha: cada usuário monta a divisão dele no
     # primeiro acesso. Semear uma lista fixa daria a todo mundo as mesmas
     # categorias — e a duas pessoas diferentes, as categorias de uma só.

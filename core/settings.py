@@ -49,6 +49,13 @@ def database_url(padrao: str = "") -> str:
     return get("DATABASE_URL", padrao)
 
 
-def app_password() -> str:
-    """Senha de acesso ao aplicativo. Vazia significa acesso livre."""
-    return get("APP_PASSWORD")
+def admin_database_url() -> str:
+    """URL com poder de alterar o esquema.
+
+    O aplicativo em produção conecta com uma role sem privilégio, que não
+    pode criar nem alterar tabelas — é justamente isso que faz a RLS valer
+    para ele. Migrações e scripts administrativos precisam de outra
+    conexão, e é esta. Quando não houver, cai na de sempre: é o caso do
+    SQLite local e dos testes, onde não existe essa separação.
+    """
+    return get("ADMIN_DATABASE_URL") or database_url()
