@@ -933,3 +933,19 @@ def list_ajustes(session: Session, period: Period) -> list[BalanceAdjustment]:
             .order_by(BalanceAdjustment.created_at.desc())
         )
     )
+
+
+def get_transferencia(session: Session, transfer_id: int) -> CategoryTransfer | None:
+    """Uma transferência do usuário, pelo id."""
+    return escopo.buscar(session, CategoryTransfer, id=transfer_id)
+
+
+def tem_estorno(session: Session, transfer_id: int) -> bool:
+    """Se a transferência já foi estornada."""
+    return bool(
+        session.scalar(
+            select(func.count())
+            .select_from(CategoryTransfer)
+            .where(CategoryTransfer.reversal_of_id == transfer_id)
+        )
+    )

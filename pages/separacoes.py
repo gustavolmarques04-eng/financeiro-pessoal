@@ -12,6 +12,8 @@ from datetime import date
 import streamlit as st
 
 from core import budget_service as budget
+from core import categories as cat
+from core import repositories as repo
 from core.budget_service import SeparacaoLinha
 from core.database import session_scope
 from core.utils import month_label, to_cents, to_decimal
@@ -27,6 +29,8 @@ from ui.shared import (
     secao,
     selo,
     seletor_periodo,
+    subtitulo,
+    valor_colorido,
 )
 
 from ui.login import require_auth
@@ -156,12 +160,24 @@ def _bloco(item: SeparacaoLinha) -> None:
             f"**{item.categoria.label}** &nbsp; {selo(item.status)}",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            linha("Planejado", dinheiro_html(item.planejado_cents))
+        corpo = (
+            linha("Planejado este mês", dinheiro_html(item.planejado_cents))
             + linha("Já separado", dinheiro_html(item.separado_cents))
-            + linha("Falta separar", dinheiro_html(item.falta_cents)),
-            unsafe_allow_html=True,
         )
+        if item.excedente_cents:
+            # Acontece quando a renda é reduzida depois da separação: o
+            # dinheiro já saiu, e apagá-lo seria inventar um movimento.
+            corpo += linha("Separado a mais", dinheiro_html(item.excedente_cents))
+        else:
+            corpo += linha("Falta separar", dinheiro_html(item.falta_cents))
+        corpo += linha("Saldo acumulado", valor_colorido(item.saldo_cents))
+        if item.categoria.target_amount_cents:
+            corpo += linha(
+                "Meta",
+                f"{dinheiro_html(item.saldo_cents)} de "
+                f"{dinheiro_html(item.categoria.target_amount_cents)}",
+            )
+        st.markdown(corpo, unsafe_allow_html=True)
 
         # A chave carrega o plano vigente: se o plano mudar, o widget é
         # recriado e volta a refletir o estado real (desmarcado).
@@ -214,3 +230,107 @@ st.caption(
     "Se entrar renda nova, o planejado sobe e a categoria volta a ficar pendente — "
     "o que você já separou continua registrado."
 )
+
+
+# --------------------------------------------------------------------------
+# Transferir dinheiro entre categorias
+# --------------------------------------------------------------------------
+secao("↔ Transferir dinheiro")
+st.caption(
+    "Move saldo de uma categoria para outra. O total do seu dinheiro não muda "
+    "— só o lugar onde ele está."
+)
+
+ativas = [item.categoria for item in plano.separacoes if item.categoria.active]
+if len(ativas) < 2:
+    aviso_vazio("São necessárias ao menos duas categorias para transferir.")
+else:
+    with st.form("transferir"):
+        quando = st.date_input("Data", value=periodo.month, key="tr_data")
+        coluna_de, coluna_para = st.columns(2)
+        de = coluna_de.selectbox(
+            "De", options=ativas, format_func=lambda v: v.label, key="tr_de"
+        )
+        para = coluna_para.selectbox(
+            "Para",
+            options=[v for v in ativas if v.id != de.id],
+            format_func=lambda v: v.label,
+            key="tr_para",
+        )
+        valor = st.number_input("Valor (R$)", min_value=0.01, step=10.0, key="tr_valor")
+        descricao = st.text_input("Descrição (opcional)", key="tr_desc")
+        enviou = st.form_submit_button("Transferir", use_container_width=True)
+
+    if enviou:
+        try:
+            with session_scope() as s:
+                budget.transferir(
+                    s,
+                    month=quando,
+                    origem_id=de.id,
+                    destino_id=para.id,
+                    valor_cents=to_cents(valor),
+                    note=descricao or None,
+                    on=quando,
+                )
+        except budget.TransferenciaInvalida as erro:
+            st.error(str(erro))
+        else:
+            st.toast(f"{dinheiro(to_cents(valor))} de {de.name} para {para.name}.")
+            st.rerun()
+
+
+# --------------------------------------------------------------------------
+# Histórico
+# --------------------------------------------------------------------------
+subtitulo("Transferências do período")
+with session_scope() as s:
+    historico = repo.list_transferencias(s, periodo)
+    nomes = {v.id: v.label for v in cat.resolve_all(s, periodo.month)}
+    estornadas = {t.reversal_of_id for t in historico if t.reversal_of_id}
+
+if not historico:
+    aviso_vazio("Nenhuma transferência neste período.")
+else:
+    filtro = st.selectbox(
+        "Filtrar por categoria",
+        options=["Todas", *sorted(nomes.values())],
+        key="tr_filtro",
+    )
+    for movimento in historico:
+        origem = nomes.get(movimento.from_category_id, "—")
+        destino = nomes.get(movimento.to_category_id, "—")
+        if filtro != "Todas" and filtro not in (origem, destino):
+            continue
+
+        with st.container(border=True):
+            coluna_texto, coluna_botao = st.columns([4, 1])
+            rotulo = "↩ estorno · " if movimento.reversal_of_id else ""
+            coluna_texto.markdown(
+                f"{rotulo}**{origem} → {destino}** · "
+                f"{dinheiro(movimento.amount_cents)}  \n"
+                f"<small>{movimento.transfer_date:%d/%m/%Y}"
+                + (f" · {movimento.description}" if movimento.description else "")
+                + "</small>",
+                unsafe_allow_html=True,
+            )
+            ja_estornada = movimento.id in estornadas
+            if movimento.reversal_of_id is None:
+                if coluna_botao.button(
+                    "Estornar",
+                    key=f"est_{movimento.id}",
+                    disabled=ja_estornada,
+                    help=(
+                        "Já estornada"
+                        if ja_estornada
+                        else "Cria o movimento inverso, sem apagar o original."
+                    ),
+                ):
+                    with session_scope() as s:
+                        budget.estornar_transferencia(s, movimento.id)
+                    st.toast("Estornada.", icon="↩")
+                    st.rerun()
+    st.caption(
+        "Transferências não são apagadas nem editadas: corrigir é estornar, "
+        "para o histórico continuar explicando cada centavo."
+    )

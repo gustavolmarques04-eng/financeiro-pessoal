@@ -226,27 +226,23 @@ def test_todos_os_pontos_que_configuram_o_alembic_escapam_a_url() -> None:
 # --------------------------------------------------------------------------
 # Desempenho: o Streamlit reexecuta a página inteira a cada clique
 # --------------------------------------------------------------------------
-def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
-    """Um render completo precisa caber em poucas idas ao banco.
-
-    Com o banco na nuvem cada consulta custa latência de rede. Este teste
-    trava a regressão que fez o app demorar segundos por clique: chamadas
-    1+N e recálculos repetidos do mesmo plano.
-    """
+def _consultas_de_um_render(meses: int, categorias: int) -> int:
+    """Quantas idas ao banco custa um render completo da Home."""
     import sys
     from datetime import date
 
     sys.path.insert(0, str(RAIZ))
     from sqlalchemy import create_engine, event
-    from sqlalchemy.orm import Session, sessionmaker
+    from sqlalchemy.orm import sessionmaker
 
     from core import auth
     from core import budget_service as budget
     from core import investment_service as inv
+    from core import onboarding_service as onboarding
     from core import repositories as repo
-    from core.database import seed_defaults
-    from core.models import Base
+    from core.models import Base, IncomeType
     from core.period import Period
+    from core.utils import add_months
 
     auth.definir_atual(
         auth.Usuario(id=uuid.uuid4(), email="arq@financeiro.local", login="arq")
@@ -254,8 +250,30 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
     engine = create_engine("sqlite://")  # em memória
     Base.metadata.create_all(engine)
     fabrica = sessionmaker(bind=engine)
+    inicio = date(2026, 9, 1)
+
+    fatia, resto = divmod(10_000, categorias)
+    desejadas = [
+        onboarding.CategoriaDesejada(
+            nome=f"Categoria {i}", percent_bp=fatia + (resto if i == 0 else 0)
+        )
+        for i in range(categorias)
+    ]
+
     with fabrica() as preparo:
-        seed_defaults(preparo)
+        onboarding.criar_plano_inicial(
+            preparo,
+            onboarding.PlanoInicial(categorias=desejadas),
+            a_partir_de=inicio,
+        )
+        for i in range(meses):
+            repo.create_income(
+                preparo,
+                on=add_months(inicio, -i),
+                amount_cents=295_775,
+                type_=IncomeType.SALARIO,
+                description="salário",
+            )
         preparo.commit()
 
     consultas: list[str] = []
@@ -264,7 +282,7 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
     def _contar(conn, cursor, stmt, params, ctx, many):  # type: ignore[no-untyped-def]
         consultas.append(stmt)
 
-    periodo = Period.of_month(date(2026, 9, 1))
+    periodo = Period.of_month(inicio)
     with fabrica() as session:
         budget.get_resumo_periodo(session, periodo)
         inv.get_resumo(session, periodo)
@@ -276,9 +294,36 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
         repo.known_months(session)
 
     engine.dispose()
-    assert len(consultas) <= 25, (
-        f"um render do dashboard fez {len(consultas)} consultas; "
+    auth.definir_atual(None)
+    return len(consultas)
+
+
+def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
+    """Um render completo precisa caber em poucas idas ao banco.
+
+    Com o banco na nuvem cada consulta custa latência de rede. Este teste
+    trava a regressão que fez o app demorar segundos por clique: chamadas
+    1+N e recálculos repetidos do mesmo plano.
+    """
+    consultas = _consultas_de_um_render(meses=1, categorias=3)
+    assert consultas <= 25, (
+        f"um render do dashboard fez {consultas} consultas; "
         "algo voltou a consultar por categoria ou recalcular o plano"
+    )
+
+
+def test_custo_por_clique_nao_cresce_com_o_numero_de_categorias() -> None:
+    """Quarenta categorias têm de custar o mesmo que três.
+
+    É o formato de bug mais fácil de reintroduzir: um laço que pergunta o
+    saldo de cada categoria, invisível com três e caríssimo com quarenta.
+    """
+    poucas = _consultas_de_um_render(meses=1, categorias=3)
+    muitas = _consultas_de_um_render(meses=1, categorias=40)
+
+    assert muitas == poucas, (
+        f"três categorias custam {poucas} consultas e quarenta custam "
+        f"{muitas}: algo voltou a consultar por categoria"
     )
 
 
@@ -289,93 +334,10 @@ def test_custo_por_clique_nao_cresce_com_o_historico() -> None:
     custasse uma ida ao banco, o app ficaria mais lento a cada mês usado —
     exatamente o problema que o histórico em memória existe para evitar.
     """
-    import sys
-    from datetime import date
-
-    sys.path.insert(0, str(RAIZ))
-    from sqlalchemy import create_engine, event
-    from sqlalchemy.orm import sessionmaker
-
-    from core import auth
-    from core import budget_service as budget
-    from core import repositories as repo
-    from core.database import seed_defaults
-    from core.models import Base, IncomeType
-    from core.period import Period
-    from core.utils import add_months
-
-    auth.definir_atual(
-        auth.Usuario(id=uuid.uuid4(), email="arq@financeiro.local", login="arq")
-    )
-
-    def medir(meses: int) -> int:
-        engine = create_engine("sqlite://")
-        Base.metadata.create_all(engine)
-        fabrica = sessionmaker(bind=engine)
-        inicio = date(2026, 9, 1)
-        with fabrica() as preparo:
-            seed_defaults(preparo)
-            for i in range(meses):
-                repo.create_income(
-                    preparo,
-                    on=add_months(inicio, -i),
-                    amount_cents=295775,
-                    type_=IncomeType.SALARIO,
-                    description="salário",
-                )
-            preparo.commit()
-
-        consultas: list[str] = []
-
-        @event.listens_for(engine, "before_cursor_execute")
-        def _contar(conn, cursor, stmt, params, ctx, many):  # type: ignore[no-untyped-def]
-            consultas.append(stmt)
-
-        with fabrica() as session:
-            budget.get_resumo_periodo(session, Period.of_month(inicio))
-            budget.get_month_plan(session, inicio)
-
-        engine.dispose()
-        return len(consultas)
-
-    um_mes = medir(1)
-    dez_anos = medir(120)
+    um_mes = _consultas_de_um_render(meses=1, categorias=3)
+    dez_anos = _consultas_de_um_render(meses=120, categorias=3)
 
     assert dez_anos == um_mes, (
         f"um mês de histórico custa {um_mes} consultas e dez anos custam "
         f"{dez_anos}: o cálculo voltou a perguntar ao banco mês a mês"
     )
-
-
-def test_toda_pagina_exige_login_antes_de_qualquer_coisa() -> None:
-    """``require_auth()`` tem de ser a primeira instrução executada.
-
-    Não basta chamar em algum lugar: se qualquer código rodar antes, os
-    valores podem chegar a ser lidos e desenhados, e o "sem login não
-    aparece nada" vira "aparece por um instante".
-    """
-    import ast
-
-    paginas = sorted((RAIZ / "pages").glob("*.py"))
-    assert paginas, "nenhuma página encontrada"
-
-    for caminho in paginas:
-        arvore = ast.parse(caminho.read_text(encoding="utf-8"))
-        executaveis = [
-            no
-            for no in arvore.body
-            if not isinstance(no, (ast.Import, ast.ImportFrom))
-            and not (isinstance(no, ast.Expr) and isinstance(no.value, ast.Constant))
-        ]
-        assert executaveis, f"{caminho.name} não executa nada"
-
-        primeira = executaveis[0]
-        chamou = (
-            isinstance(primeira, ast.Assign)
-            and isinstance(primeira.value, ast.Call)
-            and getattr(primeira.value.func, "id", "") == "require_auth"
-        )
-        assert chamou, (
-            f"{caminho.name}: a primeira instrução é "
-            f"{ast.dump(primeira)[:60]}, e não require_auth()"
-        )

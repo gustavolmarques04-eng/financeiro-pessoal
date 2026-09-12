@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from core import budget_service as budget
 from core import categories as cat
+from core import profile_service
 from core import investment_service as investimentos
 from core import repositories as repo
 from core.models import IncomeType
@@ -25,6 +26,9 @@ SLUGS_SEPARACAO = ("independencia", "reserva", "viagem", "compras")
 
 def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
     """Percorre os oito passos do roteiro de consistência."""
+    profile_service.atualizar(
+        session, investment_category_id=cats["independencia"]
+    )
     # ------------------------------------------------------------------
     # 1. Setembro: base de R$ 2.952,21
     # ------------------------------------------------------------------

@@ -1,12 +1,13 @@
 """Regras de investimentos e dividendos.
 
-Esta versão não controla ativos individuais. O aplicativo sabe quanto foi
-**separado** para as categorias marcadas com ``counts_as_investment_capital``
-(capital destinado) e quanto o usuário informou de patrimônio investido no
-fechamento — a diferença é o resultado estimado.
+Esta versão não controla ativos individuais. O usuário aponta, no perfil, **qual** das categorias dele representa os
+investimentos. O capital aportado sai dos movimentos reais dessa categoria
+— separações confirmadas e transferências —, e o valor atual sai do
+fechamento. A diferença é o resultado.
 
-Nada aqui depende do nome "Independência": o que vale é a propriedade
-declarada na versão da categoria.
+Nada aqui depende de nome: nem "Independência", nem "Investimentos". Se
+ninguém escolheu uma categoria, o app não mostra resultado nenhum, em vez
+de adivinhar.
 
 Dividendos ficam de fora dessa conta de propósito: se entrassem, seriam
 contados duas vezes (uma no resultado, outra quando virassem renda).
@@ -20,6 +21,8 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from . import categories as cat
+from . import ledger
+from . import profile_service
 from . import repositories as repo
 from .models import ClosingField
 from .period import Period
@@ -59,22 +62,47 @@ class ResumoInvestimentos:
         return self.informado and self.capital_destinado_cents > 0
 
 
-def categorias_de_investimento(session: Session, month: date):
-    """Categorias cujas separações formam capital investido."""
-    return [
-        v
-        for v in cat.resolve_all(session, month)
-        if v.counts_as_investment_capital
-    ]
+def categoria_de_investimento(session: Session, month: date):
+    """A categoria que o usuário declarou como "meus investimentos".
+
+    Vem do perfil, por id. Se ninguém escolheu nenhuma, devolve ``None`` —
+    e o app simplesmente não mostra resultado de investimento, em vez de
+    adivinhar pelo nome.
+    """
+    escolhida = profile_service.obter(session).investment_category_id
+    if escolhida is None:
+        return None
+    return next(
+        (v for v in cat.resolve_all(session, month) if v.id == escolhida), None
+    )
 
 
 def capital_destinado(session: Session, month: date) -> int:
-    """Soma de tudo já separado para categorias de capital, até o mês."""
+    """Quanto do dinheiro investido saiu do bolso do usuário.
+
+    É o custo de aquisição: separações confirmadas, mais transferências
+    recebidas, menos as enviadas, mais o que ele declarou já ter aportado
+    antes de usar o aplicativo. Não é o saldo — a diferença entre os dois
+    é justamente o rendimento.
+    """
     alvo = month_start(month)
-    return sum(
-        repo.sum_allocations_until(session, alvo, vista.id)
-        for vista in categorias_de_investimento(session, alvo)
+    vista = categoria_de_investimento(session, alvo)
+    if vista is None:
+        return 0
+
+    aportado = profile_service.obter(session).investment_cost_basis_cents or 0
+    # Separações cruas, e não o saldo do histórico: o fechamento redefine o
+    # saldo com o valor conferido no banco (que já inclui rendimento), e
+    # rendimento não é dinheiro que saiu do bolso.
+    separado = repo.sum_allocations_until(session, alvo, vista.id)
+    recebido = sum(
+        efeito
+        for (mes, cid), efeito in repo.transferencias_por_mes_e_categoria(
+            session
+        ).items()
+        if cid == vista.id and mes <= alvo
     )
+    return aportado + separado + recebido
 
 
 def get_resumo(session: Session, period: Period) -> ResumoInvestimentos:
@@ -96,6 +124,31 @@ def get_resumo(session: Session, period: Period) -> ResumoInvestimentos:
     return ResumoInvestimentos(
         posicao, destinado, fechamento.investimentos_cents, informado=True
     )
+
+
+def valor_para_o_patrimonio(session: Session, month: date) -> tuple[int, bool]:
+    """Quanto os investimentos valem hoje, e se o valor foi conferido.
+
+    Existe para resolver uma dupla contagem: se o patrimônio somasse o
+    saldo contábil da categoria **e** o valor informado no fechamento, o
+    mesmo dinheiro entraria duas vezes.
+
+    Quando há fechamento com valor informado, ele manda — é o número que
+    você conferiu no banco. Quando não há, vale o saldo calculado, e o
+    segundo item da resposta vem ``False`` para a tela poder dizer
+    "estimado".
+    """
+    from . import budget_service as budget
+
+    alvo = month_start(month)
+    vista = categoria_de_investimento(session, alvo)
+    if vista is None:
+        return 0, False
+
+    fechamento = repo.latest_closing_until(session, alvo)
+    if fechamento is not None and fechamento.investimentos_cents:
+        return fechamento.investimentos_cents, True
+    return budget.saldo_categoria(session, vista, alvo), False
 
 
 def dividendos_do_periodo(session: Session, period: Period) -> int:

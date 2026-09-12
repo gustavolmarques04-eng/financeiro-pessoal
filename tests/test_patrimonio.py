@@ -6,12 +6,24 @@ from sqlalchemy.orm import Session
 
 from core import budget_service as budget
 from core import categories as cat
+from core import profile_service
 from core import investment_service as investimentos
 from core import repositories as repo
 from core.models import IncomeType
 from core.utils import to_cents
 
 from .conftest import OUTUBRO, SETEMBRO, mes
+
+
+def _como_investimentos(session, category_id):
+    """Aponta, no perfil, qual categoria representa os investimentos.
+
+    O app nao adivinha mais pelo nome nem por flag na categoria: quem
+    escolhe e a pessoa, e a escolha mora no perfil.
+    """
+    from core import profile_service
+
+    profile_service.atualizar(session, investment_category_id=category_id)
 
 
 def _linha(session, mes_alvo, slug):
@@ -189,10 +201,11 @@ def test_patrimonio_inclui_envelope_novo_automaticamente(
 # --------------------------------------------------------------------------
 # Investimentos e dividendos
 # --------------------------------------------------------------------------
-def test_capital_destinado_usa_a_propriedade_da_categoria(
+def test_capital_destinado_vem_da_categoria_escolhida_no_perfil(
     session: Session, receita, cats
 ) -> None:
-    """Capital destinado soma as categorias marcadas, não um nome."""
+    """O capital soma os movimentos reais da categoria apontada."""
+    _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
     receita(2952.21, mes=OUTUBRO)
@@ -201,15 +214,30 @@ def test_capital_destinado_usa_a_propriedade_da_categoria(
     assert investimentos.capital_destinado(session, SETEMBRO) == to_cents(1446.58)
     assert investimentos.capital_destinado(session, OUTUBRO) == to_cents(1446.58) * 2
 
-    marcadas = investimentos.categorias_de_investimento(session, SETEMBRO)
-    assert [v.slug for v in marcadas] == ["independencia"]
-    assert all(v.counts_as_investment_capital for v in marcadas)
+    escolhida = investimentos.categoria_de_investimento(session, SETEMBRO)
+    assert escolhida is not None and escolhida.slug == "independencia"
 
 
-def test_capital_ignora_categoria_renomeada_mas_segue_a_flag(
+def test_sem_categoria_escolhida_nao_ha_investimentos(
     session: Session, receita, cats
 ) -> None:
-    """Trocar a flag muda o capital; trocar o nome não muda nada."""
+    """Sem escolha, o app nao adivinha: simplesmente nao mostra."""
+    receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
+
+    assert investimentos.categoria_de_investimento(session, SETEMBRO) is None
+    assert investimentos.capital_destinado(session, SETEMBRO) == 0
+
+
+def test_capital_ignora_categoria_renomeada(
+    session: Session, receita, cats
+) -> None:
+    """Renomear a categoria não pode mexer em nada.
+
+    A escolha mora no perfil, por id: o nome é só rótulo. E a categoria
+    escolhida é uma só — separar para outra não vira capital investido.
+    """
+    _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
@@ -217,18 +245,20 @@ def test_capital_ignora_categoria_renomeada_mas_segue_a_flag(
     cat.upsert_version(session, cats["independencia"], SETEMBRO, name="Aposentadoria")
     assert investimentos.capital_destinado(session, SETEMBRO) == to_cents(1446.58)
 
-    cat.upsert_version(
-        session, cats["viagem"], SETEMBRO, counts_as_investment_capital=True
-    )
-    assert investimentos.capital_destinado(session, SETEMBRO) == to_cents(
-        1446.58
-    ) + to_cents(413.31)
+    escolhida = investimentos.categoria_de_investimento(session, SETEMBRO)
+    assert escolhida is not None
+    assert escolhida.name == "Aposentadoria"
+    assert escolhida.id == cats["independencia"]
+
+    # A viagem tem saldo, mas não é a categoria de investimentos.
+    assert investimentos.capital_destinado(session, SETEMBRO) == to_cents(1446.58)
 
 
 def test_resultado_dos_investimentos_pode_ser_negativo(
     session: Session, receita, cats
 ) -> None:
     """Valor atual abaixo do capital destinado gera resultado negativo."""
+    _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
     repo.upsert_closing(
@@ -252,6 +282,7 @@ def test_investimento_sem_valor_informado_nao_mostra_prejuizo(
 
     Antes desta regra o painel mostrava -100%, o que assustava sem motivo.
     """
+    _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
     repo.upsert_closing(
@@ -272,6 +303,7 @@ def test_investimento_sem_valor_informado_nao_mostra_prejuizo(
 
 def test_dividendos_ficam_fora_do_resultado(session: Session, receita, cats) -> None:
     """Dividendos são informativos e não mexem no resultado estimado."""
+    _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
     repo.upsert_closing(
@@ -313,6 +345,9 @@ def test_fluxo_completo_permanece_consistente(
     session: Session, receita, gasto, cats
 ) -> None:
     """Percorre o ciclo inteiro conferindo que tudo bate ponta a ponta."""
+    profile_service.atualizar(
+        session, investment_category_id=cats["independencia"]
+    )
     repo.set_opening_balance(session, cats["compras"], to_cents(5.54))
 
     receita(1775.94, descricao="Primeiro salário")

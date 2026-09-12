@@ -8,8 +8,9 @@ import streamlit as st
 from core import budget_service as budget
 from core import investment_service as investimentos
 from core import repositories as repo
+from core import categories as cat
 from core.database import session_scope
-from core.models import ClosingField
+from core.models import AdjustmentKind, ClosingField
 from core.utils import month_label, to_cents, to_decimal
 from ui.shared import (
     aviso_vazio,
@@ -19,9 +20,12 @@ from ui.shared import (
     dinheiro_html,
     garantir_banco,
     mostrar_cartoes,
+    linha,
     percentual,
     secao,
     seletor_periodo,
+    subtitulo,
+    valor_colorido,
 )
 
 from ui.login import require_auth
@@ -211,3 +215,83 @@ else:
         hide_index=True,
     )
     st.caption("Cada mês guarda o que foi informado nele — nada é sobrescrito depois.")
+
+
+# --------------------------------------------------------------------------
+# Conferir meus saldos
+# --------------------------------------------------------------------------
+secao("🔍 Conferir meus saldos")
+st.caption(
+    "Compare o que o app calculou com o que está de verdade na sua conta. "
+    "A diferença vira um lançamento explicado — nada é sobrescrito."
+)
+
+with session_scope() as s:
+    conferiveis = [
+        item
+        for item in budget.get_month_plan(s, periodo.month).separacoes
+        if item.categoria.active and item.categoria.include_in_net_worth
+    ]
+    ajustes_do_mes = repo.list_ajustes(s, periodo)
+    nomes_cat = {v.id: v.label for v in cat.resolve_all(s, periodo.month)}
+
+if not conferiveis:
+    aviso_vazio("Nenhuma categoria marcada como parte do patrimônio.")
+else:
+    MOTIVOS = {
+        "Rendimento": AdjustmentKind.RENDIMENTO,
+        "Correção": AdjustmentKind.CORRECAO,
+        "Ajuste manual": AdjustmentKind.MANUAL,
+        "Outro": AdjustmentKind.OUTRO,
+    }
+    for item in conferiveis:
+        with st.container(border=True):
+            st.markdown(f"**{item.categoria.label}**")
+            st.markdown(
+                linha("O app calculou", dinheiro_html(item.saldo_cents)),
+                unsafe_allow_html=True,
+            )
+            coluna_valor, coluna_motivo = st.columns([3, 2])
+            real = coluna_valor.number_input(
+                "Saldo real (deixe igual se estiver certo)",
+                min_value=0.0,
+                step=10.0,
+                value=float(to_decimal(max(0, item.saldo_cents))),
+                key=f"conf_{item.categoria.id}_{periodo.month}",
+            )
+            motivo = coluna_motivo.selectbox(
+                "Motivo da diferença",
+                options=list(MOTIVOS),
+                key=f"conf_mot_{item.categoria.id}_{periodo.month}",
+            )
+            if st.button(
+                "Registrar diferença",
+                key=f"conf_bt_{item.categoria.id}_{periodo.month}",
+            ):
+                with session_scope() as s:
+                    diferenca = budget.conferir_saldo(
+                        s,
+                        month=periodo.month,
+                        category_id=item.categoria.id,
+                        saldo_real_cents=to_cents(real),
+                        motivo=MOTIVOS[motivo],
+                    )
+                if diferenca:
+                    st.toast(
+                        f"Registrado {dinheiro(diferenca)} como {motivo.lower()}.",
+                        icon="✅",
+                    )
+                else:
+                    st.toast("Já estava batendo — nada a registrar.")
+                st.rerun()
+
+if ajustes_do_mes:
+    subtitulo("Ajustes deste período")
+    for ajuste in ajustes_do_mes:
+        st.markdown(
+            linha(
+                f"{nomes_cat.get(ajuste.category_id, '—')} · {ajuste.kind.label}",
+                valor_colorido(ajuste.amount_cents),
+            ),
+            unsafe_allow_html=True,
+        )

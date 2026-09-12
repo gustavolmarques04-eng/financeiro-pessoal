@@ -649,14 +649,34 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
     # guardado". A marca ``include_in_net_worth`` decide depois quais
     # somam no patrimônio — ver ``total_cents``.
     vistas = cat.resolve_active(session, posicao)
-    parcelas = [
-        ParcelaPatrimonio(
-            categoria=v,
-            valor_cents=saldo_categoria(session, v, posicao),
-            no_patrimonio=v.include_in_net_worth,
+
+    # A categoria de investimentos é o único caso em que o saldo contábil
+    # não é a melhor resposta: quando você informa no fechamento quanto os
+    # investimentos valem hoje, esse número já inclui o rendimento. Somar
+    # os dois contaria o mesmo dinheiro duas vezes, então o informado
+    # substitui o calculado.
+    from . import investment_service as inv
+
+    investida = inv.categoria_de_investimento(session, posicao)
+    valor_informado, conferido = (
+        inv.valor_para_o_patrimonio(session, posicao)
+        if investida is not None
+        else (0, False)
+    )
+
+    parcelas = []
+    for vista in vistas:
+        if investida is not None and vista.id == investida.id and conferido:
+            valor = valor_informado
+        else:
+            valor = saldo_categoria(session, vista, posicao)
+        parcelas.append(
+            ParcelaPatrimonio(
+                categoria=vista,
+                valor_cents=valor,
+                no_patrimonio=vista.include_in_net_worth,
+            )
         )
-        for v in vistas
-    ]
     return Patrimonio(
         posicao=posicao,
         parcelas=parcelas,
@@ -808,3 +828,131 @@ def fontes_para_cobrir(
     disponiveis = [(v, s) for v, s in candidatas if s >= minimo_cents]
     disponiveis.sort(key=lambda par: par[1], reverse=True)
     return disponiveis
+
+
+def estornar_transferencia(session: Session, transfer_id: int) -> None:
+    """Desfaz uma transferência criando o movimento inverso.
+
+    Não se edita nem se apaga uma transferência antiga: isso reescreveria
+    o passado e deixaria o saldo sem explicação. O estorno é uma linha
+    nova, no sentido contrário, apontando para a original — de modo que o
+    histórico continua contando o que realmente aconteceu, inclusive o
+    erro.
+    """
+    original = repo.get_transferencia(session, transfer_id)
+    if original is None:
+        raise TransferenciaInvalida("Transferência não encontrada.")
+    if original.reversal_of_id is not None:
+        raise TransferenciaInvalida("Isto já é um estorno.")
+    if repo.tem_estorno(session, transfer_id):
+        raise TransferenciaInvalida("Esta transferência já foi estornada.")
+
+    repo.criar_transferencia(
+        session,
+        month=original.month,
+        on=original.transfer_date,
+        from_category_id=original.to_category_id,
+        to_category_id=original.from_category_id,
+        amount_cents=original.amount_cents,
+        note=f"Estorno: {original.description or 'transferência'}",
+        reversal_of_id=original.id,
+    )
+
+
+def esvaziar_e_desativar(
+    session: Session, category_id: int, destino_id: int, month: date
+) -> int:
+    """Move todo o saldo para outra categoria e então desativa.
+
+    Desativar uma categoria com dinheiro dentro faria o saldo sumir da
+    tela sem que nada tivesse sido gasto — dinheiro desaparecendo sem
+    explicação é justamente o que este aplicativo existe para evitar.
+
+    Devolve quanto foi transferido. Tudo acontece na transação de quem
+    chama: ou a categoria é esvaziada **e** desativada, ou nada muda.
+    """
+    alvo = month_start(month)
+    vistas = {v.id: v for v in cat.resolve_all(session, alvo)}
+    origem = vistas.get(category_id)
+    if origem is None:
+        raise TransferenciaInvalida("Categoria não encontrada.")
+
+    saldo = saldo_categoria(session, origem, alvo)
+    movido = 0
+    if saldo > 0:
+        transferir(
+            session,
+            month=alvo,
+            origem_id=category_id,
+            destino_id=destino_id,
+            valor_cents=saldo,
+            note=f"Saldo de {origem.name} ao desativar",
+        )
+        movido = saldo
+    elif saldo < 0:
+        # Saldo negativo é dívida: quem assume a categoria assume a dívida.
+        transferir(
+            session,
+            month=alvo,
+            origem_id=destino_id,
+            destino_id=category_id,
+            valor_cents=-saldo,
+            note=f"Dívida de {origem.name} ao desativar",
+        )
+        movido = saldo
+
+    cat.desativar_categoria(session, category_id, alvo)
+    return movido
+
+
+def saldo_impede_desativar(session: Session, category_id: int, month: date) -> int:
+    """Saldo que precisa de destino antes de desativar. Zero libera."""
+    alvo = month_start(month)
+    vistas = {v.id: v for v in cat.resolve_all(session, alvo)}
+    vista = vistas.get(category_id)
+    if vista is None:
+        return 0
+    return saldo_categoria(session, vista, alvo)
+
+
+def conferir_saldo(
+    session: Session,
+    *,
+    month: date,
+    category_id: int,
+    saldo_real_cents: int,
+    motivo: "AdjustmentKind | None" = None,
+    nota: str | None = None,
+) -> int:
+    """Registra a diferença entre o saldo calculado e o conferido no banco.
+
+    O número não é sobrescrito: a diferença vira uma linha de ajuste com
+    motivo. Assim o saldo passa a bater com a conta, **e** continua
+    existindo uma explicação para cada centavo — um rendimento de R$ 7,32
+    fica registrado como rendimento, e não como um número que mudou
+    sozinho.
+
+    Devolve a diferença aplicada; zero quando já batia.
+    """
+    from .models import AdjustmentKind
+
+    alvo = month_start(month)
+    vistas = {v.id: v for v in cat.resolve_all(session, alvo)}
+    vista = vistas.get(category_id)
+    if vista is None:
+        raise TransferenciaInvalida("Categoria não encontrada.")
+
+    calculado = saldo_categoria(session, vista, alvo)
+    diferenca = saldo_real_cents - calculado
+    if diferenca == 0:
+        return 0
+
+    repo.criar_ajuste(
+        session,
+        month=alvo,
+        category_id=category_id,
+        amount_cents=diferenca,
+        kind=motivo or AdjustmentKind.MANUAL,
+        note=nota,
+    )
+    return diferenca
