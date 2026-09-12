@@ -150,7 +150,6 @@ def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
         SETEMBRO,
         reserva_cents=to_cents(1774.88),
         investimentos_cents=to_cents(1500),
-        dividendos_cents=to_cents(40),
     )
 
     patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
@@ -175,7 +174,7 @@ def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
     assert anual.recebido_cents == to_cents(2975.94) + to_cents(3000)
     # Jantar (150) + as três parcelas do tênis, todas dentro de 2026 (300).
     assert anual.gasto_cents == to_cents(150) + to_cents(300)
-    assert anual.dividendos_cents == to_cents(40)
+    assert anual.dividendos_cents == 0, "nenhum dividendo registrado"
     assert anual.patrimonio.posicao == SETEMBRO, "único fechamento do ano"
     assert anual.patrimonio.total_cents == budget.get_patrimonio(
         session, mes(SETEMBRO)

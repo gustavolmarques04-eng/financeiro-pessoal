@@ -184,7 +184,6 @@ def ler_planilha(caminho: Path) -> Leitura:
         percentuais_bp=percentuais,
         reserva_cents=_cents(dash["B20"].value),
         investimentos_cents=_cents(dash["B21"].value),
-        dividendos_cents=_cents(dash["B22"].value),
     )
 
     receitas = wb["Receitas"]
@@ -389,7 +388,6 @@ def importar(leitura: Leitura) -> None:
                 leitura.mes,
                 reserva_cents=leitura.reserva_cents,
                 investimentos_cents=leitura.investimentos_cents,
-                dividendos_cents=leitura.dividendos_cents,
                 note="Importado da planilha",
             )
 

@@ -157,14 +157,62 @@ def dividendos_do_periodo(session: Session, period: Period) -> int:
 
 
 def dividendos_acumulados(session: Session, month: date) -> int:
-    """Soma dos dividendos informados até o mês (inclusive)."""
+    """Soma dos dividendos recebidos até o mês (inclusive)."""
     alvo = month_start(month)
-    return sum(f.dividendos_cents for f in repo.list_closings(session) if f.month <= alvo)
+    return sum(
+        valor
+        for (mes, _cid), valor in repo.dividendos_por_mes_e_categoria(session).items()
+        if mes <= alvo
+    )
+
+
+def dividendos_por_categoria(session: Session, period: Period) -> dict[int, int]:
+    """Quanto cada categoria rendeu no período.
+
+    Dividendo pertence a quem o gerou: é o que permite responder qual
+    carteira rendeu, em vez de um número solto no fim do mês.
+    """
+    meses = set(period.months)
+    saida: dict[int, int] = {}
+    for (mes, cid), valor in repo.dividendos_por_mes_e_categoria(session).items():
+        if mes in meses:
+            saida[cid] = saida.get(cid, 0) + valor
+    return saida
+
+
+def registrar_dividendo(
+    session: Session,
+    *,
+    month: date,
+    category_id: int,
+    amount_cents: int,
+    nota: str | None = None,
+) -> None:
+    """Lança um dividendo na categoria que o gerou.
+
+    O valor entra no saldo dela — dividendo reinvestido é dinheiro que
+    passou a existir ali, e não um número à parte.
+    """
+    from .models import AdjustmentKind
+
+    if amount_cents == 0:
+        return
+    repo.criar_ajuste(
+        session,
+        month=month_start(month),
+        category_id=category_id,
+        amount_cents=amount_cents,
+        kind=AdjustmentKind.DIVIDENDO,
+        note=nota,
+    )
 
 
 def serie_dividendos(session: Session, meses: list[date]) -> list[tuple[date, int, int]]:
     """Série ``(mês, dividendos do mês, acumulado)`` para os gráficos."""
-    por_mes = {f.month: f.dividendos_cents for f in repo.list_closings(session)}
+    por_categoria = repo.dividendos_por_mes_e_categoria(session)
+    por_mes: dict[date, int] = {}
+    for (mes, _cid), valor in por_categoria.items():
+        por_mes[mes] = por_mes.get(mes, 0) + valor
     saida, acumulado = [], 0
     for mes in meses:
         valor = por_mes.get(mes, 0)

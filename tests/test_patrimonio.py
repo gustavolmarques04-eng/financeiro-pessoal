@@ -51,7 +51,6 @@ def test_patrimonio_soma_as_quatro_parcelas(session: Session, receita, cats) -> 
         SETEMBRO,
         reserva_cents=to_cents(1774.88),
         investimentos_cents=to_cents(1000),
-        dividendos_cents=0,
     )
 
     patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
@@ -81,7 +80,6 @@ def test_separacao_anterior_ao_fechamento_nao_conta_duas_vezes(
         SETEMBRO,
         reserva_cents=0,
         investimentos_cents=to_cents(1446.58),
-        dividendos_cents=0,
     )
 
     patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
@@ -102,7 +100,6 @@ def test_separacao_posterior_ao_fechamento_soma_ao_informado(
         SETEMBRO,
         reserva_cents=to_cents(1273.79),
         investimentos_cents=0,
-        dividendos_cents=0,
     )
 
     antes = budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva")
@@ -125,7 +122,6 @@ def test_separacao_de_mes_posterior_sempre_soma(
         SETEMBRO,
         reserva_cents=to_cents(1000),
         investimentos_cents=0,
-        dividendos_cents=0,
     )
     budget.confirmar_separacao(session, OUTUBRO, cats["reserva"])
 
@@ -142,8 +138,7 @@ def test_novo_fechamento_reconcilia_o_saldo(session: Session, receita, cats) -> 
     receita(2952.21, mes=SETEMBRO)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1273.79),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
     budget.confirmar_separacao(session, SETEMBRO, cats["reserva"])
     assert budget.get_patrimonio(session, mes(SETEMBRO)).valor_de("reserva") == (
         to_cents(1273.79) + to_cents(501.88)
@@ -152,8 +147,7 @@ def test_novo_fechamento_reconcilia_o_saldo(session: Session, receita, cats) -> 
     # No mês seguinte você confere a conta e digita o valor real.
     repo.upsert_closing(
         session, OUTUBRO, reserva_cents=to_cents(1800),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
     assert budget.get_patrimonio(session, mes(OUTUBRO)).valor_de("reserva") == (
         to_cents(1800)
     )
@@ -266,7 +260,6 @@ def test_resultado_dos_investimentos_pode_ser_negativo(
         SETEMBRO,
         reserva_cents=0,
         investimentos_cents=to_cents(1300),
-        dividendos_cents=0,
     )
 
     resumo = investimentos.get_resumo(session, mes(SETEMBRO))
@@ -290,7 +283,6 @@ def test_investimento_sem_valor_informado_nao_mostra_prejuizo(
         SETEMBRO,
         reserva_cents=to_cents(1774.88),
         investimentos_cents=0,
-        dividendos_cents=0,
     )
 
     resumo = investimentos.get_resumo(session, mes(SETEMBRO))
@@ -301,35 +293,36 @@ def test_investimento_sem_valor_informado_nao_mostra_prejuizo(
     assert resumo.rentabilidade_valida is False
 
 
-def test_dividendos_ficam_fora_do_resultado(session: Session, receita, cats) -> None:
-    """Dividendos são informativos e não mexem no resultado estimado."""
+def test_dividendos_nao_inflam_o_capital_aportado(
+    session: Session, receita, cats
+) -> None:
+    """Dividendo é ganho, não aporte.
+
+    Se entrasse no capital, o app entenderia que você colocou mais dinheiro
+    do bolso — e o resultado do investimento encolheria na mesma medida em
+    que a carteira rendeu, que é o avesso da verdade.
+    """
     _como_investimentos(session, cats["independencia"])
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["independencia"])
-    repo.upsert_closing(
-        session,
-        SETEMBRO,
-        reserva_cents=0,
-        investimentos_cents=to_cents(1500),
-        dividendos_cents=to_cents(80),
+    capital_antes = investimentos.capital_destinado(session, SETEMBRO)
+
+    investimentos.registrar_dividendo(
+        session, month=SETEMBRO, category_id=cats["independencia"],
+        amount_cents=to_cents(40),
     )
 
-    resumo = investimentos.get_resumo(session, mes(SETEMBRO))
-    assert resumo.resultado_cents == to_cents(1500) - to_cents(1446.58)
-    assert investimentos.dividendos_do_periodo(session, mes(SETEMBRO)) == to_cents(80)
-    assert investimentos.dividendos_acumulados(session, SETEMBRO) == to_cents(80)
+    assert investimentos.capital_destinado(session, SETEMBRO) == capital_antes
 
 
 def test_fechamento_guarda_o_historico_de_cada_mes(session: Session) -> None:
     """Cada mês preserva o que foi informado nele."""
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1774.88),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
     repo.upsert_closing(
         session, OUTUBRO, reserva_cents=to_cents(2500),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     assert repo.get_closing(session, SETEMBRO).reserva_cents == to_cents(1774.88)
     assert repo.get_closing(session, OUTUBRO).reserva_cents == to_cents(2500)
@@ -381,7 +374,6 @@ def test_fluxo_completo_permanece_consistente(
         SETEMBRO,
         reserva_cents=to_cents(1774.88),
         investimentos_cents=to_cents(1446.58),
-        dividendos_cents=0,
     )
     patrimonio = budget.get_patrimonio(session, mes(SETEMBRO))
     assert patrimonio.total_cents == (

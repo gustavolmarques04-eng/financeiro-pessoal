@@ -377,8 +377,7 @@ def test_meta_de_acompanhamento_nao_corta_o_plano(
     )
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=0,
-        investimentos_cents=to_cents(5000), dividendos_cents=0,
-    )
+        investimentos_cents=to_cents(5000),    )
 
     plano = budget.get_month_plan(session, SETEMBRO)
     assert plano.planejado[cats["independencia"]] == antes
@@ -402,8 +401,7 @@ def test_meta_com_valor_alvo_continua_cortando_o_plano(
     receita(2000.00, mes=SETEMBRO)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(5900),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     plano = budget.get_month_plan(session, SETEMBRO)
     assert plano.planejado[cats["reserva"]] == to_cents(100)
@@ -448,8 +446,7 @@ def test_planejado_da_meta_nao_muda_ao_confirmar_a_separacao(
     receita(2000.00, mes=SETEMBRO)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(5800),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     antes = budget.get_month_plan(session, SETEMBRO).planejado[cats["reserva"]]
     assert antes == to_cents(200), "faltavam R$ 200 para a meta"

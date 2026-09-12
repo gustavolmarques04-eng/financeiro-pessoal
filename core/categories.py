@@ -63,6 +63,7 @@ class CategoryView:
     include_in_net_worth: bool
     balance_from_closing: ClosingField | None
     accumulates_balance: bool = False
+    receives_dividends: bool = False
 
     @property
     def label(self) -> str:
@@ -124,6 +125,7 @@ def _to_view(versao: CategoryVersion, slug: str, mes: date) -> CategoryView:
         include_in_net_worth=versao.include_in_net_worth,
         balance_from_closing=versao.balance_from_closing,
         accumulates_balance=versao.accumulates_balance,
+        receives_dividends=versao.receives_dividends,
     )
 
 
@@ -306,6 +308,7 @@ def _copiar_versao(base: CategoryVersion, effective_month: date) -> CategoryVers
         include_in_net_worth=base.include_in_net_worth,
         balance_from_closing=base.balance_from_closing,
         accumulates_balance=base.accumulates_balance,
+        receives_dividends=base.receives_dividends,
     )
 
 
@@ -366,6 +369,7 @@ def criar_categoria(
     counts_as_investment_capital: bool = False,
     include_in_net_worth: bool | None = None,
     accumulates_balance: bool | None = None,
+    receives_dividends: bool = False,
 ) -> Category:
     """Cria uma categoria valendo a partir de um mês.
 
@@ -412,6 +416,7 @@ def criar_categoria(
             if accumulates_balance is None
             else accumulates_balance
         ),
+        receives_dividends=receives_dividends,
     )
     return categoria
 

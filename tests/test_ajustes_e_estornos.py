@@ -307,7 +307,6 @@ def test_investimento_nao_e_contado_duas_vezes(
         SETEMBRO,
         reserva_cents=0,
         investimentos_cents=to_cents(1600),
-        dividendos_cents=0,
     )
 
     valor, conferido = investimentos.valor_para_o_patrimonio(session, SETEMBRO)
@@ -370,7 +369,6 @@ def test_patrimonio_usa_o_valor_informado_e_nao_soma_com_o_saldo(
         SETEMBRO,
         reserva_cents=0,
         investimentos_cents=saldo + to_cents(500),
-        dividendos_cents=0,
     )
     depois = budget.get_patrimonio(session_vazia, mes(SETEMBRO))
 

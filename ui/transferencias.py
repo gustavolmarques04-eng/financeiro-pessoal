@@ -22,22 +22,28 @@ from .shared import dinheiro, privacidade
 DEIXAR_NEGATIVO = "Deixar negativo (desconta do próximo mês)"
 
 
-def botao_enviar_sobra(
-    categoria: CategoryView, disponivel_cents: int, mes: date
+def botao_transferir(
+    categoria: CategoryView, saldo_cents: int, mes: date
 ) -> None:
-    """Abre, a partir da sobra, o envio para outra categoria."""
-    rotulo = "Enviar sobra" if not privacidade() else "Enviar"
+    """Abre, a partir do saldo, a transferência para outra categoria.
+
+    O valor mostrado é o **saldo** da categoria, e não uma sobra: inclui o
+    que a pessoa declarou já ter guardado. Chamar isso de sobra sugeriria
+    que é dinheiro excedente, quando muitas vezes é exatamente o oposto —
+    é a reserva dela.
+    """
+    rotulo = "Transferir"
     with st.popover(rotulo, use_container_width=True):
         st.caption(
-            f"Sobrou {dinheiro(disponivel_cents)} em {categoria.name}. "
-            "Para onde vai?"
+            f"Há {dinheiro(saldo_cents)} em {categoria.name}. "
+            "Mover quanto, e para onde?"
         )
         with session_scope() as session:
             destinos = budget.fontes_para_cobrir(
                 session, mes, excluindo=categoria.id, minimo_cents=0
             )
         if not destinos:
-            st.info("Nenhuma outra categoria guarda saldo.", icon="🗒️")
+            st.info("Não há outra categoria para receber.", icon="🗒️")
             return
 
         chave = f"envio_{categoria.id}_{mes:%Y%m}"
@@ -50,8 +56,8 @@ def botao_enviar_sobra(
         valor = st.number_input(
             "Valor",
             min_value=0.01,
-            max_value=float(to_decimal(disponivel_cents)),
-            value=float(to_decimal(disponivel_cents)),
+            max_value=float(to_decimal(saldo_cents)),
+            value=float(to_decimal(saldo_cents)),
             step=10.0,
             key=f"{chave}_valor",
         )
@@ -63,7 +69,7 @@ def botao_enviar_sobra(
                     origem_id=categoria.id,
                     destino_id=escolha.id,
                     valor_cents=to_cents(valor),
-                    note=f"Sobra de {categoria.name}",
+                    note=f"De {categoria.name}",
                 )
             st.toast(f"Enviado para {escolha.name}.", icon="✅")
             st.rerun()

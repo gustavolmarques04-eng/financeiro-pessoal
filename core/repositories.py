@@ -587,7 +587,6 @@ def upsert_closing(
     *,
     reserva_cents: int,
     investimentos_cents: int,
-    dividendos_cents: int,
     note: str | None = None,
 ) -> MonthlyClosing:
     """Cria ou atualiza o fechamento de um mês."""
@@ -599,7 +598,6 @@ def upsert_closing(
 
     fechamento.reserva_cents = reserva_cents
     fechamento.investimentos_cents = investimentos_cents
-    fechamento.dividendos_cents = dividendos_cents
     fechamento.note = note
     session.flush()
     cache.limpar(session)
@@ -620,18 +618,47 @@ def list_closings(session: Session) -> list[MonthlyClosing]:
     return _fechamentos_em_cache(session)
 
 
+def dividendos_por_mes_e_categoria(
+    session: Session,
+) -> dict[tuple[date, int], int]:
+    """Dividendos de cada categoria em cada mês, numa consulta só."""
+
+    def calcular() -> dict[tuple[date, int], int]:
+        consulta = (
+            select(
+                BalanceAdjustment.month,
+                BalanceAdjustment.category_id,
+                func.sum(BalanceAdjustment.amount_cents),
+            )
+            .where(BalanceAdjustment.kind == AdjustmentKind.DIVIDENDO)
+            .group_by(BalanceAdjustment.month, BalanceAdjustment.category_id)
+        )
+        return {
+            (mes, cid): int(total or 0) for mes, cid, total in session.execute(consulta)
+        }
+
+    return cache.obter(session, "dividendos_por_mes_categoria", calcular)
+
+
 def sum_dividends(session: Session, period: Period) -> int:
-    """Dividendos informados dentro do período."""
+    """Dividendos recebidos no período, somando todas as categorias."""
     meses = set(period.months)
     return sum(
-        f.dividendos_cents for f in _fechamentos_em_cache(session) if f.month in meses
+        valor
+        for (mes, _cid), valor in dividendos_por_mes_e_categoria(session).items()
+        if mes in meses
     )
 
 
 def dividends_by_month(session: Session, period: Period) -> dict[date, int]:
-    """Dividendos de cada mês do período."""
-    encontrados = {f.month: f.dividendos_cents for f in _fechamentos_em_cache(session)}
-    return {mes: encontrados.get(mes, 0) for mes in period.months}
+    """Dividendos de cada mês do período, para os gráficos."""
+    por_categoria = dividendos_por_mes_e_categoria(session)
+    saida: dict[date, int] = {}
+    for mes in period.months:
+        saida[mes] = sum(
+            valor for (quando, _cid), valor in por_categoria.items() if quando == mes
+        )
+    return saida
 
 
 def get_opening_balance(session: Session, category_id: int) -> int:

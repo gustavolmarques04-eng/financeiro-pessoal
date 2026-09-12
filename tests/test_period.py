@@ -79,19 +79,55 @@ def test_visao_anual_soma_gastos_e_parcelas(session: Session, gasto, cats) -> No
     assert repo.sum_expenses(session, mes(SETEMBRO)) == to_cents(100)
 
 
-def test_visao_anual_soma_dividendos(session: Session) -> None:
-    """Dividendos anuais somam os fechamentos do ano."""
-    repo.upsert_closing(
-        session, SETEMBRO, reserva_cents=0, investimentos_cents=0,
-        dividendos_cents=to_cents(80),
+def test_visao_anual_soma_dividendos(session: Session, cats) -> None:
+    """Dividendos anuais somam os de todas as categorias no ano."""
+    investimentos.registrar_dividendo(
+        session, month=SETEMBRO, category_id=cats["independencia"],
+        amount_cents=to_cents(80),
     )
-    repo.upsert_closing(
-        session, OUTUBRO, reserva_cents=0, investimentos_cents=0,
-        dividendos_cents=to_cents(120),
+    investimentos.registrar_dividendo(
+        session, month=OUTUBRO, category_id=cats["independencia"],
+        amount_cents=to_cents(120),
     )
 
     assert investimentos.dividendos_do_periodo(session, ano(2026)) == to_cents(200)
     assert investimentos.dividendos_do_periodo(session, mes(SETEMBRO)) == to_cents(80)
+
+
+def test_dividendo_pertence_a_categoria_que_o_gerou(
+    session: Session, cats
+) -> None:
+    """Dá para responder qual carteira rendeu, e não só quanto."""
+    investimentos.registrar_dividendo(
+        session, month=SETEMBRO, category_id=cats["independencia"],
+        amount_cents=to_cents(80),
+    )
+    investimentos.registrar_dividendo(
+        session, month=SETEMBRO, category_id=cats["reserva"],
+        amount_cents=to_cents(12),
+    )
+
+    por_categoria = investimentos.dividendos_por_categoria(session, mes(SETEMBRO))
+
+    assert por_categoria[cats["independencia"]] == to_cents(80)
+    assert por_categoria[cats["reserva"]] == to_cents(12)
+
+
+def test_dividendo_soma_ao_saldo_da_categoria(session: Session, cats) -> None:
+    """Reinvestir é o padrão: o dinheiro passa a existir ali."""
+    from core import budget_service as _budget
+
+    vista = next(
+        v for v in cat.resolve_all(session, SETEMBRO) if v.slug == "viagem"
+    )
+    antes = _budget.saldo_categoria(session, vista, SETEMBRO)
+
+    investimentos.registrar_dividendo(
+        session, month=SETEMBRO, category_id=cats["viagem"],
+        amount_cents=to_cents(45),
+    )
+
+    assert _budget.saldo_categoria(session, vista, SETEMBRO) == antes + to_cents(45)
 
 
 # --------------------------------------------------------------------------
@@ -104,12 +140,10 @@ def test_patrimonio_anual_usa_o_ultimo_fechamento_do_ano(
     repo.set_opening_balance(session, cats["compras"], 0)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1000),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
     repo.upsert_closing(
         session, OUTUBRO, reserva_cents=to_cents(1500),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     anual = budget.get_patrimonio(session, ano(2026))
 
@@ -124,8 +158,7 @@ def test_patrimonio_anual_sem_dezembro_usa_o_mes_mais_recente(
     repo.set_opening_balance(session, cats["compras"], 0)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1774.88),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     anual = budget.get_patrimonio(session, ano(2026))
     assert anual.posicao == SETEMBRO
@@ -140,8 +173,7 @@ def test_patrimonio_anual_ignora_fechamento_de_outro_ano(
     repo.set_opening_balance(session, cats["compras"], 0)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1000),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     assert budget.get_patrimonio(session, ano(2025)).informado is False
     assert budget.get_patrimonio(session, ano(2026)).informado is True
@@ -155,13 +187,12 @@ def test_resumo_do_periodo_agrega_tudo(session: Session, receita, gasto, cats) -
     gasto(100.00, cats["namorada"], mes=SETEMBRO)
     repo.upsert_closing(
         session, OUTUBRO, reserva_cents=to_cents(500),
-        investimentos_cents=0, dividendos_cents=to_cents(30),
-    )
+        investimentos_cents=0,    )
 
     anual = budget.get_resumo_periodo(session, ano(2026))
     assert anual.recebido_cents == to_cents(3000)
     assert anual.gasto_cents == to_cents(100)
-    assert anual.dividendos_cents == to_cents(30)
+    assert anual.dividendos_cents == 0, "nenhum dividendo registrado"
     assert anual.patrimonio.total_cents == to_cents(500)
 
     mensal = budget.get_resumo_periodo(session, mes(SETEMBRO))
@@ -247,8 +278,7 @@ def test_patrimonio_avisa_quando_o_fechamento_e_de_outro_mes(
     repo.set_opening_balance(session, cats["compras"], 0)
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(1000),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     em_setembro = budget.get_patrimonio(session, mes(SETEMBRO))
     assert em_setembro.fechamento_em == SETEMBRO

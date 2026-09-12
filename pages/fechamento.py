@@ -39,7 +39,7 @@ garantir_banco()
 
 cabecalho(
     "📅 Fechamento mensal",
-    "Uma vez por mês: reserva, investimentos e dividendos.",
+    "Uma vez por mês: confira os saldos reais e informe o que rendeu.",
     chave="fech",
 )
 periodo = seletor_periodo("fech", permitir_anual=False)
@@ -51,7 +51,6 @@ with session_scope() as session:
         {
             "reserva": fechamento.reserva_cents,
             "investimentos": fechamento.investimentos_cents,
-            "dividendos": fechamento.dividendos_cents,
             "obs": fechamento.note or "",
         }
         if fechamento
@@ -65,7 +64,6 @@ with session_scope() as session:
             "mes": f.month,
             "reserva": f.reserva_cents,
             "investimentos": f.investimentos_cents,
-            "dividendos": f.dividendos_cents,
         }
         for f in repo.list_closings(session)
     ]
@@ -107,12 +105,6 @@ with st.form("fechamento"):
             step=50.0,
             value=float(to_decimal(atual["reserva"])) if atual else 0.0,
         )
-        dividendos = st.number_input(
-            "Dividendos recebidos no mês (R$)",
-            min_value=0.0,
-            step=10.0,
-            value=float(to_decimal(atual["dividendos"])) if atual else 0.0,
-        )
     with col_b:
         invest = st.number_input(
             f"{rotulos[ClosingField.INVESTIMENTOS]} — valor atual (R$)",
@@ -136,7 +128,6 @@ if salvar:
             mes,
             reserva_cents=to_cents(reserva),
             investimentos_cents=to_cents(invest),
-            dividendos_cents=to_cents(dividendos),
             note=observacao.strip() or None,
         )
     st.success("Fechamento salvo. Patrimônio e gráficos já refletem o novo valor.")
@@ -206,7 +197,6 @@ else:
                     "Mês": month_label(h["mes"]),
                     rotulos[ClosingField.RESERVA]: dinheiro_html(h["reserva"]),
                     rotulos[ClosingField.INVESTIMENTOS]: dinheiro_html(h["investimentos"]),
-                    "Dividendos": dinheiro_html(h["dividendos"]),
                 }
                 for h in reversed(historico)
             ]
@@ -251,6 +241,36 @@ else:
                 linha("O app calculou", dinheiro_html(item.saldo_cents)),
                 unsafe_allow_html=True,
             )
+            if item.categoria.receives_dividends:
+                # Dividendo pertence à categoria que o gerou: entra nela e
+                # aumenta o saldo, porque reinvestir é o padrão.
+                dividendo = st.number_input(
+                    "Dividendos recebidos neste mês (R$)",
+                    min_value=0.0,
+                    step=10.0,
+                    value=0.0,
+                    key=f"div_{item.categoria.id}_{periodo.month}",
+                    help="Entra nesta categoria e soma ao saldo dela.",
+                )
+                if st.button(
+                    "Registrar dividendo",
+                    key=f"div_bt_{item.categoria.id}_{periodo.month}",
+                    disabled=dividendo <= 0,
+                ):
+                    with session_scope() as s:
+                        investimentos.registrar_dividendo(
+                            s,
+                            month=periodo.month,
+                            category_id=item.categoria.id,
+                            amount_cents=to_cents(dividendo),
+                        )
+                    st.toast(
+                        f"{dinheiro(to_cents(dividendo))} lançados em "
+                        f"{item.categoria.name}.",
+                        icon="💰",
+                    )
+                    st.rerun()
+
             coluna_valor, coluna_motivo = st.columns([3, 2])
             real = coluna_valor.number_input(
                 "Saldo real (deixe igual se estiver certo)",

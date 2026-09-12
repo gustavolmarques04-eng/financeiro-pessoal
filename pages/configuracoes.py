@@ -229,6 +229,16 @@ with st.expander("✏️ Editar uma categoria"):
             key="edit_patrimonio",
         )
 
+    dividendos = st.checkbox(
+        "Esta categoria rende dividendos",
+        value=escolhida.receives_dividends,
+        key="edit_dividendos",
+        help=(
+            "O Fechamento vai perguntar quanto ela rendeu no mês, e o valor "
+            "entra nela — dividendo reinvestido soma ao saldo dela."
+        ),
+    )
+
     if tem_hist:
         st.info(
             "Esta categoria já tem histórico, então o comportamento não pode mudar. "
@@ -256,6 +266,7 @@ with st.expander("✏️ Editar uma categoria"):
                     target_amount_cents=meta_cents,
                     overflow_target_category_id=destino_id,
                     counts_as_investment_capital=capital,
+                    receives_dividends=dividendos,
                     include_in_net_worth=patrimonio,
                 )
                 repo.bump_revisions_from(session, mes_efetivo)

@@ -37,6 +37,9 @@ class CategoriaDesejada:
     saldo_inicial_cents: int = 0
     #: Se o dinheiro dela faz parte do patrimônio que está sendo construído.
     conta_no_patrimonio: bool = True
+    #: Se ela rende dividendos. Quando sim, o Fechamento pergunta quanto
+    #: rendeu no mês, e o valor entra nela.
+    rende_dividendos: bool = False
 
 
 @dataclass
@@ -119,6 +122,7 @@ def criar_plano_inicial(
             target_amount_cents=desejada.meta_cents,
             include_in_net_worth=desejada.conta_no_patrimonio,
             accumulates_balance=True,
+            receives_dividends=desejada.rende_dividendos,
         )
         criadas[desejada.nome.strip()] = categoria.id
 

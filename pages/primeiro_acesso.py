@@ -36,6 +36,7 @@ LINHA_VAZIA = {
     "meta": 0.0,
     "ja_tenho": 0.0,
     "patrimonio": True,
+    "dividendos": False,
 }
 
 
@@ -101,6 +102,15 @@ for indice, linha in enumerate(linhas):
                 help=(
                     "Sim para reserva, investimento, viagem guardada. "
                     "Não para dinheiro livre, diversão, gasto pessoal."
+                ),
+            )
+            linha["dividendos"] = st.toggle(
+                "Essa categoria rende dividendos?",
+                value=bool(linha["dividendos"]),
+                key=f"onb_div_{indice}",
+                help=(
+                    "O Fechamento vai perguntar quanto ela rendeu no mês, "
+                    "e o valor soma ao saldo dela."
                 ),
             )
 
@@ -188,6 +198,7 @@ if st.button(
                 meta_cents=(to_cents(linha["meta"]) or None),
                 saldo_inicial_cents=to_cents(linha["ja_tenho"]),
                 conta_no_patrimonio=bool(linha["patrimonio"]),
+                rende_dividendos=bool(linha["dividendos"]),
             )
             for linha in linhas
             if linha["nome"].strip()

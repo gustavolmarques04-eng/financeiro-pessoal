@@ -15,7 +15,7 @@ from core import repositories as repo
 from core.database import session_scope
 from core.utils import month_label, month_short
 from ui.forms import formulario_gasto
-from ui.transferencias import botao_enviar_sobra
+from ui.transferencias import botao_transferir
 from ui.money import chart_hover, chart_values
 from ui.shared import (
     NAVY,
@@ -209,7 +209,7 @@ else:
                 elif item.excedente_cents:
                     st.caption(f"{dinheiro(item.excedente_cents)} a mais")
                 if item.saldo_cents > 0:
-                    botao_enviar_sobra(item.categoria, item.saldo_cents, mes_ref)
+                    botao_transferir(item.categoria, item.saldo_cents, mes_ref)
     st.caption(
         "Saldo é o que já foi separado de verdade, menos os gastos. "
         "O valor planejado aparece em 🎯 Separações."

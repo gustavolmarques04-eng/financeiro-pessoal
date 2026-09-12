@@ -120,7 +120,6 @@ def test_regra_da_meta_no_plano_completo(session: Session, receita, cats) -> Non
         SETEMBRO,
         reserva_cents=to_cents(5900),
         investimentos_cents=0,
-        dividendos_cents=0,
     )
 
     plano = budget.get_month_plan(session, SETEMBRO)
@@ -255,8 +254,7 @@ def test_meta_usa_target_amount_e_nao_o_nome(session: Session, receita, cats) ->
     cat.upsert_version(session, cats["reserva"], SETEMBRO, name="Colchão")
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(5900),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     plano = budget.get_month_plan(session, SETEMBRO)
     assert plano.planejado[cats["reserva"]] == to_cents(100)
@@ -269,8 +267,7 @@ def test_overflow_usa_id_e_nao_nome(session: Session, receita, cats) -> None:
     cat.upsert_version(session, cats["independencia"], SETEMBRO, name="Aposentadoria")
     repo.upsert_closing(
         session, SETEMBRO, reserva_cents=to_cents(6000),
-        investimentos_cents=0, dividendos_cents=0,
-    )
+        investimentos_cents=0,    )
 
     plano = budget.get_month_plan(session, SETEMBRO)
     assert plano.planejado[cats["reserva"]] == 0

@@ -230,6 +230,10 @@ class CategoryVersion(Base):
     #: Se a sobra atravessa o mês. Independente de exigir separação: o
     #: "Livre" acumula sem que você precise transferir nada de banco.
     accumulates_balance: Mapped[bool] = mapped_column(default=False)
+    #: Se esta categoria rende dividendos. Quando sim, o fechamento
+    #: pergunta quanto rendeu, e o valor entra nela — dividendo pertence
+    #: a quem o gerou.
+    receives_dividends: Mapped[bool] = mapped_column(default=False)
     #: Campo do fechamento que informa o saldo real (em vez de calculá-lo).
     balance_from_closing: Mapped[ClosingField | None] = mapped_column(
         Enum(ClosingField, native_enum=False, length=20), default=None
@@ -437,7 +441,6 @@ class MonthlyClosing(Base):
     month: Mapped[date] = mapped_column(Date, primary_key=True)
     reserva_cents: Mapped[int] = mapped_column(Integer, default=0)
     investimentos_cents: Mapped[int] = mapped_column(Integer, default=0)
-    dividendos_cents: Mapped[int] = mapped_column(Integer, default=0)
     note: Mapped[str | None] = mapped_column(String(300), default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -550,6 +553,7 @@ class AdjustmentKind(str, enum.Enum):
     """Por que o saldo foi corrigido."""
 
     RENDIMENTO = "RENDIMENTO"
+    DIVIDENDO = "DIVIDENDO"
     CORRECAO = "CORRECAO"
     MANUAL = "MANUAL"
     OUTRO = "OUTRO"
@@ -559,6 +563,7 @@ class AdjustmentKind(str, enum.Enum):
         """Nome legivel."""
         return {
             AdjustmentKind.RENDIMENTO: "Rendimento",
+            AdjustmentKind.DIVIDENDO: "Dividendo",
             AdjustmentKind.CORRECAO: "Correcao",
             AdjustmentKind.MANUAL: "Ajuste manual",
             AdjustmentKind.OUTRO: "Outro",
