@@ -194,10 +194,9 @@ def init_db(engine: Engine | None = None, *, forcar: bool = False) -> Engine:
 
     run_migrations(eng)
     Base.metadata.create_all(eng, checkfirst=True)
-    factory = sessionmaker(bind=eng, expire_on_commit=False)
-    with factory() as session:
-        seed_defaults(session)
-        session.commit()
+    # Nenhuma categoria nasce sozinha: cada usuário monta a divisão dele no
+    # primeiro acesso. Semear uma lista fixa daria a todo mundo as mesmas
+    # categorias — e a duas pessoas diferentes, as categorias de uma só.
 
     if engine is None:
         _esquema_pronto = True
