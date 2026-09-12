@@ -212,3 +212,64 @@ def test_consulta_sem_usuario_nao_devolve_nada(banco) -> None:
         ).scalar_one()
 
     assert vistos == 0
+
+
+def test_apagar_categoria_nao_zera_o_dono_do_perfil() -> None:
+    """A chave composta do perfil não pode derrubar o ``user_id``.
+
+    ``ON DELETE SET NULL`` numa chave composta zera **todas** as colunas
+    dela — inclusive ``user_id``, que é ``NOT NULL``. Isso fazia apagar
+    qualquer categoria derrubar a operação inteira, e só apareceu ao zerar
+    os dados. A correção diz ao PostgreSQL qual coluna zerar.
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import text as _text
+
+    engine = create_engine(URL, connect_args={"prepare_threshold": None})
+    dono = _uuid.uuid4()
+    try:
+        with engine.begin() as conexao:
+            conexao.execute(
+                _text(
+                    "INSERT INTO categories (user_id, slug, created_at) "
+                    "VALUES (:u, :s, now())"
+                ),
+                {"u": dono, "s": f"teste_{dono.hex[:8]}"},
+            )
+            categoria = conexao.execute(
+                _text("SELECT id FROM categories WHERE user_id = :u"), {"u": dono}
+            ).scalar_one()
+            conexao.execute(
+                _text(
+                    "INSERT INTO profiles "
+                    "(user_id, onboarding_completed, investment_category_id, "
+                    " created_at, updated_at) "
+                    "VALUES (:u, false, :c, now(), now())"
+                ),
+                {"u": dono, "c": categoria},
+            )
+
+        # O passo que quebrava.
+        with engine.begin() as conexao:
+            conexao.execute(
+                _text("DELETE FROM categories WHERE user_id = :u"), {"u": dono}
+            )
+
+        with engine.begin() as conexao:
+            linha = conexao.execute(
+                _text(
+                    "SELECT user_id, investment_category_id FROM profiles "
+                    "WHERE user_id = :u"
+                ),
+                {"u": dono},
+            ).one()
+        assert linha[0] is not None, "o dono do perfil tem de sobreviver"
+        assert linha[1] is None, "a referência à categoria apagada some"
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(_text("DELETE FROM profiles WHERE user_id = :u"), {"u": dono})
+            conexao.execute(
+                _text("DELETE FROM categories WHERE user_id = :u"), {"u": dono}
+            )
+        engine.dispose()
