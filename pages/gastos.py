@@ -43,7 +43,6 @@ mes = periodo.month
 
 with session_scope() as session:
     plano = budget.get_month_plan(session, mes)
-    envelopes = budget.envelopes(session, periodo)
     parcelas_mes = [
         {
             "id": gasto.id,
@@ -168,23 +167,12 @@ else:
 # --------------------------------------------------------------------------
 # Situação das categorias e parcelas futuras
 # --------------------------------------------------------------------------
-secao("Situação do orçamento")
-for item in plano.gastos:
+secao("Saldo de cada categoria")
+for item in plano.separacoes:
+    if not item.categoria.active and not item.saldo_cents:
+        continue
     st.markdown(
-        linha(
-            item.categoria.label,
-            f"{dinheiro_html(item.gasto_cents)} de "
-            f"{dinheiro_html(item.orcamento_cents)} · "
-            f"{valor_colorido(item.disponivel_cents)}",
-        ),
-        unsafe_allow_html=True,
-    )
-for item in envelopes:
-    st.markdown(
-        linha(
-            f"{item.categoria.label} (envelope)",
-            valor_colorido(item.saldo_cents),
-        ),
+        linha(item.categoria.label, valor_colorido(item.saldo_cents)),
         unsafe_allow_html=True,
     )
 

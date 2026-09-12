@@ -40,17 +40,32 @@ class SaldoMes:
     gasto_cents: int
     #: Efeito das transferências: positivo recebeu, negativo cedeu.
     transferencia_cents: int
+    #: Correções de saldo informadas na conferência (rendimento, acerto).
+    ajuste_cents: int = 0
     #: Se o saldo do mês foi redefinido por um fechamento.
-    veio_de_fechamento: bool
+    veio_de_fechamento: bool = False
 
     @property
     def final_cents(self) -> int:
-        """Saldo no fim do mês."""
+        """Saldo no fim do mês.
+
+        Esta é a **única** definição de saldo do aplicativo::
+
+            saldo anterior
+            + separações confirmadas
+            + transferências recebidas - enviadas
+            + ajustes de conferência
+            - gastos
+
+        Repare no que não está aqui: o valor planejado. Ele é intenção,
+        não posse.
+        """
         return (
             self.inicial_cents
             + self.entrada_cents
             - self.gasto_cents
             + self.transferencia_cents
+            + self.ajuste_cents
         )
 
 
@@ -127,12 +142,15 @@ def _montar(session: Session, limite: date) -> Historico:
     separacoes = repo.separacoes_por_mes_e_categoria(session)
     transferencias = repo.transferencias_por_mes_e_categoria(session)
     quando_separou = repo.separacoes_com_hora(session)
+    ajustes = repo.ajustes_por_mes_e_categoria(session)
     iniciais = repo.saldos_iniciais(session)
 
     # Um fechamento sozinho já define uma posição que precisa ser carregada
     # para a frente, mesmo sem nenhuma receita ou gasto registrado.
     fechados = {f.month: 0 for f in repo.fechamentos(session)}
-    inicio = _primeiro_mes(bases, gastos, separacoes, transferencias, fechados)
+    inicio = _primeiro_mes(
+        bases, gastos, separacoes, transferencias, ajustes, fechados
+    )
     if inicio is None or inicio > limite:
         inicio = limite
 
@@ -167,6 +185,7 @@ def _montar(session: Session, limite: date) -> Historico:
                 gastos=gastos,
                 separacoes=separacoes,
                 transferencias=transferencias,
+                ajustes=ajustes,
                 fechamento=fechamento,
                 quando_separou=quando_separou,
             )
@@ -229,6 +248,7 @@ def _mover(
     gastos: dict[tuple[date, int], int],
     separacoes: dict[tuple[date, int], int],
     transferencias: dict[tuple[date, int], int],
+    ajustes: dict[tuple[date, int], int],
     fechamento: object | None,
     quando_separou: dict[tuple[date, int], datetime | None],
 ) -> SaldoMes:
@@ -236,15 +256,11 @@ def _mover(
     gasto = gastos.get((mes, vista.id), 0)
     transferido = transferencias.get((mes, vista.id), 0)
 
-    # Quem exige separação só recebe o que foi de fato separado. Quem é
-    # orçamento de consumo recebe a fatia do rateio, que fica na conta
-    # corrente sem precisar de nenhuma transferência de banco.
-    if vista.requires_separation:
-        entrada = separacoes.get((mes, vista.id), 0)
-    elif vista.receives_percent:
-        entrada = planejado.get(vista.id, 0)
-    else:
-        entrada = 0
+    # Só entra o que foi **confirmado**. O valor planejado é uma intenção:
+    # enquanto você não marca que separou, o dinheiro ainda está solto, e
+    # dizer que a categoria já o tem seria mentir sobre onde ele está.
+    entrada = separacoes.get((mes, vista.id), 0)
+    ajuste = ajustes.get((mes, vista.id), 0)
 
     inicial = abertura.get(vista.id, 0)
 
@@ -268,6 +284,7 @@ def _mover(
         entrada_cents=entrada,
         gasto_cents=gasto,
         transferencia_cents=transferido,
+        ajuste_cents=ajuste,
         veio_de_fechamento=veio_de_fechamento,
     )
 

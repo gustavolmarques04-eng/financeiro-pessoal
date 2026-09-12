@@ -13,6 +13,17 @@ from core import repositories as repo
 from core.models import ExpenseInstallment
 from core.utils import split_installments, to_cents
 
+def _linha(session, mes_alvo, slug):
+    """Linha de uma categoria no plano do mês, pelo slug estável."""
+    from core import budget_service as _b
+
+    return next(
+        linha
+        for linha in _b.get_month_plan(session, mes_alvo).separacoes
+        if linha.categoria.slug == slug
+    )
+
+
 from .conftest import NOVEMBRO, OUTUBRO, SETEMBRO, mes
 
 
@@ -106,90 +117,87 @@ def test_excluir_compra_remove_todas_as_parcelas(
 def test_gasto_reduz_apenas_a_sua_categoria(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Gasto em Namorada consome só o orçamento de Namorada."""
+    """Gasto em Namorada reduz o saldo de Namorada, e só dela."""
     receita(3000.00)
+    budget.confirmar_separacao(session, SETEMBRO, cats["namorada"])
+    budget.confirmar_separacao(session, SETEMBRO, cats["amigos"])
+
+    namorada_antes = _linha(session, SETEMBRO, "namorada").saldo_cents
+    amigos_antes = _linha(session, SETEMBRO, "amigos").saldo_cents
     gasto(150.00, cats["namorada"], mes=SETEMBRO)
 
-    plano = budget.get_month_plan(session, SETEMBRO)
-    namorada = next(g for g in plano.gastos if g.categoria.slug == "namorada")
-    amigos = next(g for g in plano.gastos if g.categoria.slug == "amigos")
-
-    assert namorada.gasto_cents == to_cents(150)
-    assert namorada.disponivel_cents == namorada.orcamento_cents - to_cents(150)
-    assert amigos.gasto_cents == 0
-    assert amigos.disponivel_cents == amigos.orcamento_cents
+    assert _linha(session, SETEMBRO, "namorada").saldo_cents == (
+        namorada_antes - to_cents(150)
+    )
+    assert _linha(session, SETEMBRO, "amigos").saldo_cents == amigos_antes
 
 
 def test_estouro_de_orcamento_fica_negativo(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Gastar mais que o orçamento deixa o disponível negativo."""
+    """Gastar mais do que a categoria tem deixa o saldo negativo.
+
+    O gasto é real e não pode ser recusado por falta de saldo — o que o
+    app faz é mostrar a dívida, não escondê-la.
+    """
     receita(1000.00)
+    budget.confirmar_separacao(session, SETEMBRO, cats["amigos"])
+
+    separado = _linha(session, SETEMBRO, "amigos").separado_cents
     gasto(200.00, cats["amigos"], mes=SETEMBRO)
 
-    linha = next(
-        g for g in budget.get_month_plan(session, SETEMBRO).gastos
-        if g.categoria.slug == "amigos"
-    )
-    assert linha.orcamento_cents == to_cents(30)
-    assert linha.disponivel_cents == to_cents(-170)
-    assert linha.estourou is True
+    linha_amigos = _linha(session, SETEMBRO, "amigos")
+    assert linha_amigos.saldo_cents == separado - to_cents(200)
+    assert linha_amigos.saldo_cents < 0
 
 
-def test_categorias_mensais_levam_a_sobra_para_o_mes_seguinte(
-    session: Session, receita, gasto, cats
-) -> None:
-    """O que não foi gasto continua sendo seu no mês seguinte.
-
-    O dinheiro do orçamento de consumo fica na conta corrente: virar o mês
-    não o faz desaparecer.
-    """
+def test_sobra_confirmada_atravessa_o_mes(session: Session, receita, gasto, cats) -> None:
+    """O que foi separado e não gasto continua seu no mês seguinte."""
     receita(1000.00, mes=SETEMBRO)
     receita(1000.00, mes=OUTUBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["namorada"])
     gasto(50.00, cats["namorada"], mes=SETEMBRO)
 
-    setembro = next(
-        g for g in budget.get_month_plan(session, SETEMBRO).gastos
-        if g.categoria.slug == "namorada"
-    )
-    outubro = next(
-        g for g in budget.get_month_plan(session, OUTUBRO).gastos
-        if g.categoria.slug == "namorada"
-    )
+    setembro = _linha(session, SETEMBRO, "namorada")
+    sobrou = setembro.saldo_cents
+    assert sobrou == setembro.separado_cents - to_cents(50)
 
-    assert setembro.gasto_cents == to_cents(50)
-    assert setembro.vem_de_antes_cents == 0, "não havia mês anterior"
-    sobrou = setembro.disponivel_cents
+    outubro = _linha(session, OUTUBRO, "namorada")
+    assert outubro.separado_cents == 0, "outubro ainda não foi confirmado"
+    assert outubro.saldo_cents == sobrou, "mas o saldo de setembro continua lá"
 
-    assert outubro.gasto_cents == 0
-    assert outubro.vem_de_antes_cents == sobrou
-    assert outubro.disponivel_cents == outubro.orcamento_cents + sobrou
+
+def test_planejado_nao_vira_saldo_sozinho(session: Session, receita, cats) -> None:
+    """Enquanto não se confirma, o dinheiro não é da categoria.
+
+    É a regra central: planejado é intenção, saldo é posse.
+    """
+    receita(1000.00, mes=SETEMBRO)
+
+    linha_categoria = _linha(session, SETEMBRO, "namorada")
+    assert linha_categoria.planejado_cents > 0
+    assert linha_categoria.separado_cents == 0
+    assert linha_categoria.saldo_cents == 0, "planejar não é ter"
+
+    budget.confirmar_separacao(session, SETEMBRO, cats["namorada"])
+
+    depois = _linha(session, SETEMBRO, "namorada")
+    assert depois.saldo_cents == depois.planejado_cents
 
 
 def test_estouro_vira_saldo_negativo_no_mes_seguinte(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Gastar além do orçado deixa dívida, e ela também atravessa o mês."""
+    """Gastar além do separado deixa dívida, e ela atravessa o mês."""
     receita(1000.00, mes=SETEMBRO)
     receita(1000.00, mes=OUTUBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["namorada"])
 
-    setembro_antes = next(
-        g for g in budget.get_month_plan(session, SETEMBRO).gastos
-        if g.categoria.slug == "namorada"
-    )
-    gasto(
-        float(setembro_antes.orcamento_cents) / 100 + 30.0,
-        cats["namorada"],
-        mes=SETEMBRO,
-    )
+    separado = _linha(session, SETEMBRO, "namorada").separado_cents
+    gasto(float(separado + to_cents(30)) / 100, cats["namorada"], mes=SETEMBRO)
 
-    outubro = next(
-        g for g in budget.get_month_plan(session, OUTUBRO).gastos
-        if g.categoria.slug == "namorada"
-    )
-
-    assert outubro.vem_de_antes_cents == to_cents(-30)
-    assert outubro.disponivel_cents == outubro.orcamento_cents - to_cents(30)
+    assert _linha(session, SETEMBRO, "namorada").saldo_cents == -to_cents(30)
+    assert _linha(session, OUTUBRO, "namorada").saldo_cents == -to_cents(30)
 
 
 # --------------------------------------------------------------------------
@@ -251,10 +259,10 @@ def test_parcelas_futuras_listam_compromissos(session: Session, gasto, cats) -> 
     assert futuras == [(OUTUBRO, to_cents(100)), (NOVEMBRO, to_cents(100))]
 
 
-def test_envelopes_vem_do_comportamento_e_nao_do_nome(
+def test_toda_categoria_ativa_aparece_com_saldo(
     session: Session, receita, cats
 ) -> None:
-    """A lista de envelopes sai do comportamento declarado."""
+    """Não existe mais categoria de fora: todas guardam saldo."""
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
     budget.confirmar_separacao(session, SETEMBRO, cats["compras"])
@@ -262,9 +270,8 @@ def test_envelopes_vem_do_comportamento_e_nao_do_nome(
     linhas = budget.envelopes(session, mes(SETEMBRO))
     slugs = {linha.categoria.slug for linha in linhas}
 
-    assert slugs == {"viagem", "compras"}
-    for linha in linhas:
-        assert linha.categoria.accumulates
-        assert not linha.categoria.is_monthly_budget, (
-            "orçamento de consumo acumula, mas se mostra na seção do mês"
-        )
+    assert {"viagem", "compras", "livre"} <= slugs, (
+        "o dinheiro livre também é um envelope agora"
+    )
+    for linha_envelope in linhas:
+        assert linha_envelope.categoria.accumulates

@@ -41,8 +41,9 @@ def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
     # ------------------------------------------------------------------
     # 2. Confirmar todas as separações
     # ------------------------------------------------------------------
-    for slug in SLUGS_SEPARACAO:
-        budget.confirmar_separacao(session, SETEMBRO, cats[slug])
+    # Toda categoria ativa entra na separação agora, e não só as de poupança.
+    for vista in cat.resolve_active(session, SETEMBRO):
+        budget.confirmar_separacao(session, SETEMBRO, vista.id)
 
     resumo = budget.resumo_separacoes(session, SETEMBRO)
     assert resumo.tudo_feito is True and resumo.falta_cents == 0
@@ -50,10 +51,18 @@ def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
     # ------------------------------------------------------------------
     # 3. Jantar em Namorada
     # ------------------------------------------------------------------
-    gasto(150.00, cats["namorada"], mes=SETEMBRO, descricao="Jantar")
     plano = budget.get_month_plan(session, SETEMBRO)
-    namorada = next(g for g in plano.gastos if g.categoria.slug == "namorada")
-    assert namorada.disponivel_cents == to_cents(206.65) - to_cents(150)
+    antes = next(
+        linha for linha in plano.separacoes if linha.categoria.slug == "namorada"
+    ).saldo_cents
+
+    gasto(150.00, cats["namorada"], mes=SETEMBRO, descricao="Jantar")
+
+    plano = budget.get_month_plan(session, SETEMBRO)
+    namorada = next(
+        linha for linha in plano.separacoes if linha.categoria.slug == "namorada"
+    )
+    assert namorada.saldo_cents == antes - to_cents(150)
 
     # ------------------------------------------------------------------
     # 4. Compra parcelada em Compras (3x de R$ 100)
@@ -99,13 +108,15 @@ def test_fluxo_da_especificacao(session: Session, receita, gasto, cats) -> None:
     # Independência: 49% de 3.452,21 = 1.691,58; já separados 1.446,58.
     assert plano.separacao(cats["independencia"]).falta_cents == to_cents(245.00)
 
-    # O orçamento mensal também sobe.
-    namorada = next(g for g in plano.gastos if g.categoria.slug == "namorada")
-    assert namorada.orcamento_cents == to_cents(241.65)
+    # O planejado das demais categorias também sobe.
+    namorada = next(
+        linha for linha in plano.separacoes if linha.categoria.slug == "namorada"
+    )
+    assert namorada.planejado_cents == to_cents(241.65)
 
     # Home e Separações leem o mesmo resumo.
     resumo = budget.resumo_separacoes(session, SETEMBRO)
-    assert resumo.pendentes == 4
+    assert resumo.pendentes == resumo.total, "a renda nova deixou todas pendentes"
     assert resumo.falta_cents == plano.total_falta_separar_cents
 
     # ------------------------------------------------------------------

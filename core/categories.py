@@ -73,27 +73,28 @@ class CategoryView:
 
     @property
     def requires_separation(self) -> bool:
-        """Se aparece na tela de separações."""
-        return self.behavior.requires_separation
+        """Toda categoria ativa passa pela confirmação de separação.
+
+        Não existe mais categoria que receba dinheiro sozinha. Enquanto o
+        valor não é confirmado, ele está planejado — e planejado não é
+        saldo. Vale para a mais óbvia (reserva) e para a menos óbvia
+        (dinheiro livre): as duas só têm saldo depois que você confirma.
+        """
+        return self.active
 
     @property
     def accumulates(self) -> bool:
-        """Se o saldo passa de um mês para o outro.
+        """Todo saldo atravessa o mês.
 
-        É escolha da categoria, não consequência do comportamento: o
-        "Livre" acumula a sobra sem exigir que você separe nada.
+        Nada expira na virada: o que sobrou continua na conta, e o que
+        faltou continua faltando.
         """
-        return self.accumulates_balance
-
-    @property
-    def is_monthly_budget(self) -> bool:
-        """Se é orçamento de consumo mensal."""
-        return self.behavior.is_monthly_budget
+        return True
 
     @property
     def receives_percent(self) -> bool:
-        """Se participa do rateio da renda."""
-        return self.behavior.receives_percent
+        """Toda categoria ativa participa do rateio da renda."""
+        return self.active
 
 
 # --------------------------------------------------------------------------

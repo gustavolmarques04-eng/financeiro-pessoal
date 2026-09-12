@@ -23,6 +23,7 @@ ESPERADO_SETEMBRO = {
     "compras": to_cents(265.70),
     "namorada": to_cents(206.65),
     "amigos": to_cents(88.57),
+    "outro": 0,
     "livre": to_cents(29.52),
 }
 
@@ -286,8 +287,8 @@ def test_resumo_de_separacoes_bate_com_o_plano(session: Session, receita, cats) 
     assert resumo.pendentes == resumo.total
     assert resumo.falta_cents == plano.total_falta_separar_cents
 
-    for slug in ("independencia", "reserva", "viagem", "compras"):
-        budget.confirmar_separacao(session, SETEMBRO, cats[slug])
+    for vista in cat.resolve_active(session, SETEMBRO):
+        budget.confirmar_separacao(session, SETEMBRO, vista.id)
 
     resumo = budget.resumo_separacoes(session, SETEMBRO)
     assert resumo.tudo_feito is True

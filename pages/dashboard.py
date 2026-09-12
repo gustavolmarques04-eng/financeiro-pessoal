@@ -60,7 +60,6 @@ with session_scope() as session:
     mes_ref = budget.mes_de_referencia(session, periodo)
     plano = budget.get_month_plan(session, mes_ref)
     resumo_sep = budget.resumo_separacoes(session, mes_ref)
-    envelopes = budget.envelopes(session, periodo)
     metas = budget.metas(session, periodo)
 
     if periodo.is_year:
@@ -90,7 +89,7 @@ else:
     apoio_patrimonio = f"posição de {month_label(resumo.patrimonio.posicao)}"
 apoio_total = (
     f"{dinheiro(resumo.patrimonio.guardado_cents)} guardado"
-    f" + {dinheiro(resumo.disponivel_cents)} livre no mês"
+    f" + {dinheiro(resumo.nao_separado_cents)} ainda não separado"
 )
 apoio_resultado = (
     percentual(resumo_inv.rentabilidade_pct) + " sobre o capital"
@@ -162,52 +161,36 @@ with st.expander("➕ Registrar gasto", expanded=False):
 # --------------------------------------------------------------------------
 # Disponível para gastar
 # --------------------------------------------------------------------------
-secao("Disponível para gastar")
+secao("Saldos por categoria")
 
-subtitulo("Orçamento do mês")
-if not plano.gastos:
-    aviso_vazio("Nenhuma categoria de orçamento mensal ativa.")
+if not plano.separacoes:
+    aviso_vazio("Nenhuma categoria ainda. Crie as suas em Configurações.")
 else:
-    colunas = st.columns(min(len(plano.gastos), 3))
-    for indice, item in enumerate(plano.gastos):
-        with colunas[indice % len(colunas)]:
-            with st.container(border=True):
-                st.markdown(f"**{item.categoria.label}**")
-                corpo = ""
-                if item.vem_de_antes_cents:
-                    corpo += linha(
-                        "Veio do mês anterior", valor_colorido(item.vem_de_antes_cents)
-                    )
-                corpo += linha("Orçado", dinheiro_html(item.orcamento_cents))
-                if item.transferido_cents:
-                    corpo += linha(
-                        "Transferências", valor_colorido(item.transferido_cents)
-                    )
-                corpo += linha("Gasto", dinheiro_html(item.gasto_cents))
-                corpo += linha("Disponível", valor_colorido(item.disponivel_cents))
-                st.markdown(corpo, unsafe_allow_html=True)
-                if item.disponivel_cents > 0:
-                    botao_enviar_sobra(item.categoria, item.disponivel_cents, mes_ref)
-    st.caption(
-        f"Orçamento de {month_label(plano.month)}. A sobra atravessa o mês: "
-        "o que não foi gasto continua seu."
-    )
-
-subtitulo("Saldos acumulados")
-if not envelopes:
-    aviso_vazio("Nenhuma categoria acumulativa ativa.")
-else:
-    colunas = st.columns(min(len(envelopes), 3))
-    for indice, item in enumerate(envelopes):
+    # Uma lista só: toda categoria tem percentual, separação e saldo. O
+    # que se quer olhar no celular é quanto há em cada uma.
+    visiveis = [
+        item
+        for item in plano.separacoes
+        if item.categoria.active or item.saldo_cents
+    ]
+    colunas = st.columns(min(len(visiveis), 3) or 1)
+    for indice, item in enumerate(visiveis):
         with colunas[indice % len(colunas)]:
             with st.container(border=True):
                 st.markdown(f"**{item.categoria.label}**")
                 st.markdown(
-                    linha("Saldo disponível", valor_colorido(item.saldo_cents))
-                    + linha("Gasto no período", dinheiro_html(item.gasto_no_periodo_cents)),
-                    unsafe_allow_html=True,
+                    valor_colorido(item.saldo_cents), unsafe_allow_html=True
                 )
-    st.caption("Saldo acumulado de todos os meses, menos os gastos da categoria.")
+                if item.falta_cents:
+                    st.caption(f"faltam {dinheiro(item.falta_cents)}")
+                elif item.excedente_cents:
+                    st.caption(f"{dinheiro(item.excedente_cents)} a mais")
+                if item.saldo_cents > 0:
+                    botao_enviar_sobra(item.categoria, item.saldo_cents, mes_ref)
+    st.caption(
+        "Saldo é o que já foi separado de verdade, menos os gastos. "
+        "O valor planejado aparece em 🎯 Separações."
+    )
 
 
 # --------------------------------------------------------------------------

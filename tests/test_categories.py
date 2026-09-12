@@ -105,14 +105,19 @@ def test_desativar_categoria_nao_apaga_historico(
     repo.bump_revisions_from(session, OUTUBRO)
 
     setembro = budget.get_month_plan(session, SETEMBRO)
-    assert any(g.categoria.slug == "namorada" for g in setembro.gastos)
+    assert any(linha.categoria.slug == "namorada" for linha in setembro.separacoes)
     assert setembro.planejado[cats["namorada"]] == to_cents(206.65)
     assert repo.sum_expenses(session, mes(SETEMBRO), category_id=cats["namorada"]) == (
         to_cents(100)
     )
 
     outubro = budget.get_month_plan(session, OUTUBRO)
-    assert not any(g.categoria.slug == "namorada" for g in outubro.gastos)
+    ativa_em_outubro = [
+        linha
+        for linha in outubro.separacoes
+        if linha.categoria.slug == "namorada" and linha.categoria.active
+    ]
+    assert not ativa_em_outubro
     assert cat.get_view(session, cats["namorada"], OUTUBRO).active is False
 
 
@@ -157,13 +162,20 @@ def test_mensagem_indica_quanto_falta(session: Session, cats) -> None:
     assert "Faltam" in str(erro.value)
 
 
-def test_categoria_de_acompanhamento_fica_fora_dos_cem(session: Session) -> None:
-    """``TRACKING_ONLY`` não participa do rateio nem da validação."""
-    vistas = cat.resolve_all(session, SETEMBRO)
-    outro = next(v for v in vistas if v.slug == "outro")
+def test_categoria_com_zero_por_cento_e_valida(session: Session, cats) -> None:
+    """Uma categoria pode ficar com 0% sem quebrar o fechamento em 100%.
 
-    assert outro.receives_percent is False
-    assert outro.percent_bp == 0
+    Toda categoria ativa participa do rateio; participar com zero é uma
+    escolha legitima — ela so nao recebe nada este mes.
+    """
+    vistas = cat.resolve_active(session, SETEMBRO)
+    zeradas = [v for v in vistas if v.percent_bp == 0]
+
+    assert zeradas, "o cadastro inicial tem ao menos uma categoria sem fatia"
+    for vista in zeradas:
+        assert vista.receives_percent, "participa do rateio, mesmo com zero"
+
+    # E o total continua tendo de fechar exatamente 100%.
     cat.validar_total(vistas)
 
 

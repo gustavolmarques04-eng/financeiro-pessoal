@@ -7,6 +7,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from core import budget_service as budget
+from core import categories as cat
 from core import investment_service as investimentos
 from core import repositories as repo
 from core.period import Period, PeriodMode
@@ -190,8 +191,8 @@ def test_separacoes_anuais_sao_resumo_por_mes(session: Session, receita, cats) -
     """No anual há um resumo por mês; confirmação continua mensal."""
     receita(2952.21, mes=SETEMBRO)
     receita(2952.21, mes=OUTUBRO)
-    for slug in ("independencia", "reserva", "viagem", "compras"):
-        budget.confirmar_separacao(session, SETEMBRO, cats[slug])
+    for vista in cat.resolve_active(session, SETEMBRO):
+        budget.confirmar_separacao(session, SETEMBRO, vista.id)
 
     resumos = [
         budget.resumo_separacoes(session, m) for m in ano(2026).months
@@ -202,7 +203,7 @@ def test_separacoes_anuais_sao_resumo_por_mes(session: Session, receita, cats) -
     assert len(resumos) == 12
     assert setembro.tudo_feito is True
     assert outubro.tudo_feito is False
-    assert outubro.pendentes == 4
+    assert outubro.pendentes == outubro.total, "nada confirmado em outubro"
     # Cada resumo é de um mês: não existe confirmação "do ano".
     assert all(r.month in ano(2026).months for r in resumos)
 
@@ -226,15 +227,17 @@ def test_mes_de_referencia_no_modo_anual(session: Session, receita, gasto, cats)
 def test_orcamento_mensal_no_modo_anual_nao_fica_zerado(
     session: Session, receita, cats
 ) -> None:
-    """O bloco de orçamento mostra números reais mesmo em visão anual."""
+    """A lista por categoria mostra números reais mesmo em visão anual."""
     receita(2952.21, mes=SETEMBRO)
 
     referencia = budget.mes_de_referencia(session, ano(2026))
     plano = budget.get_month_plan(session, referencia)
-    namorada = next(g for g in plano.gastos if g.categoria.slug == "namorada")
+    namorada = next(
+        linha for linha in plano.separacoes if linha.categoria.slug == "namorada"
+    )
 
     assert referencia == SETEMBRO
-    assert namorada.orcamento_cents == to_cents(206.65)
+    assert namorada.planejado_cents == to_cents(206.65)
 
 
 def test_patrimonio_avisa_quando_o_fechamento_e_de_outro_mes(

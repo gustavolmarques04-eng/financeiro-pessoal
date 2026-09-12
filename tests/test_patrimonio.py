@@ -14,6 +14,17 @@ from core.utils import to_cents
 from .conftest import OUTUBRO, SETEMBRO, mes
 
 
+def _linha(session, mes_alvo, slug):
+    """Linha de uma categoria no plano do mes, pelo slug estavel."""
+    from core import budget_service as _b
+
+    return next(
+        linha
+        for linha in _b.get_month_plan(session, mes_alvo).separacoes
+        if linha.categoria.slug == slug
+    )
+
+
 # --------------------------------------------------------------------------
 # 11 — patrimônio não duplica
 # --------------------------------------------------------------------------
@@ -313,17 +324,21 @@ def test_fluxo_completo_permanece_consistente(
     assert plano.base_cents == to_cents(2952.21)
     assert plano.total_planejado_cents == plano.base_cents
 
-    for slug in ("independencia", "reserva", "viagem", "compras"):
-        budget.confirmar_separacao(session, SETEMBRO, cats[slug])
+    # Agora toda categoria ativa participa: separar "tudo" quer dizer
+    # todas, e não só as de poupança.
+    for vista in cat.resolve_active(session, SETEMBRO):
+        budget.confirmar_separacao(session, SETEMBRO, vista.id)
 
     plano = budget.get_month_plan(session, SETEMBRO)
     assert plano.total_falta_separar_cents == 0
-    assert all(linha.feito for linha in plano.separacoes)
+    assert budget.nao_separado_no_mes(session, SETEMBRO) == 0
 
+    namorada_antes = _linha(session, SETEMBRO, "namorada").saldo_cents
     gasto(150.00, cats["namorada"], mes=SETEMBRO)
     plano = budget.get_month_plan(session, SETEMBRO)
-    namorada = next(g for g in plano.gastos if g.categoria.slug == "namorada")
-    assert namorada.disponivel_cents == to_cents(206.65) - to_cents(150)
+    assert _linha(session, SETEMBRO, "namorada").saldo_cents == (
+        namorada_antes - to_cents(150)
+    )
     assert plano.gasto_cents == to_cents(150)
 
     repo.upsert_closing(
@@ -397,74 +412,89 @@ def test_categoria_fora_do_patrimonio_nao_entra_nas_parcelas_do_patrimonio(
     )
 
 
-def test_gasto_em_categoria_de_consumo_nao_mexe_no_guardado(
+def test_gasto_sai_do_guardado_mas_nao_do_patrimonio_quando_a_categoria_e_de_consumo(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Gasto em orçamento mensal não é dinheiro guardado que saiu."""
+    """Duas coisas diferentes, e as duas verdadeiras.
+
+    O dinheiro do "Livre" existe e some quando é gasto — então o guardado
+    cai. Mas ele nunca contou como patrimônio, porque o usuário marcou
+    assim: então o patrimônio não se mexe.
+    """
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+    budget.confirmar_separacao(session, SETEMBRO, cats["livre"])
     antes = budget.get_patrimonio(session, mes(SETEMBRO))
 
     gasto(85.10, cats["livre"], mes=SETEMBRO)
     depois = budget.get_patrimonio(session, mes(SETEMBRO))
 
-    assert depois.guardado_cents == antes.guardado_cents
-    assert depois.total_cents == antes.total_cents
+    assert depois.guardado_cents == antes.guardado_cents - to_cents(85.10)
+    assert depois.total_cents == antes.total_cents, (
+        "o Livre está fora do patrimônio por escolha, então ele não muda"
+    )
 
 
 # --------------------------------------------------------------------------
 # Todo o dinheiro (guardado + sobra do orçamento do mês)
 # --------------------------------------------------------------------------
-def test_gasto_no_orcamento_mensal_reduz_o_dinheiro_total(
+def test_gasto_reduz_o_dinheiro_total(
     session: Session, receita, gasto, cats
 ) -> None:
-    """Gastar do orçamento do mês tem de aparecer no total.
-
-    Era o furo: "Livre" não separa dinheiro, então ficava fora do guardado
-    e gastar dele não mexia em número nenhum.
-    """
+    """Gastar tira dinheiro do total, venha de onde vier."""
     receita(2952.21, mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["livre"])
     antes = budget.get_resumo_periodo(session, mes(SETEMBRO))
 
     gasto(85.10, cats["livre"], mes=SETEMBRO)
     depois = budget.get_resumo_periodo(session, mes(SETEMBRO))
 
     assert depois.dinheiro_total_cents == antes.dinheiro_total_cents - to_cents(85.10)
-    assert depois.patrimonio.guardado_cents == antes.patrimonio.guardado_cents, (
-        "gasto de consumo não sai do dinheiro separado"
-    )
 
 
-def test_dinheiro_total_e_guardado_mais_disponivel(
+def test_dinheiro_total_e_guardado_mais_o_que_falta_separar(
     session: Session, receita, cats
 ) -> None:
-    """O total é a soma exata das duas partes que a Home mostra."""
+    """O total e a soma exata das duas partes que a Home mostra."""
     receita(2952.21, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
 
     resumo = budget.get_resumo_periodo(session, mes(SETEMBRO))
 
     assert resumo.dinheiro_total_cents == (
-        resumo.patrimonio.guardado_cents + resumo.disponivel_cents
+        resumo.patrimonio.guardado_cents + resumo.nao_separado_cents
     )
 
 
-def test_disponivel_nao_soma_categorias_que_acumulam(
+def test_nao_separado_e_o_que_entrou_menos_o_confirmado(
     session: Session, receita, cats
 ) -> None:
-    """A sobra do mês olha só o orçamento de consumo, senão conta duas vezes."""
+    """O indicador existe para nenhum centavo ficar invisivel.
+
+    Recebido menos confirmado e exatamente o dinheiro que esta na conta
+    sem destino declarado.
+    """
     receita(2952.21, mes=SETEMBRO)
-    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
-
-    disponivel = budget.disponivel_no_mes(session, SETEMBRO)
-    guardado = budget.get_patrimonio(session, mes(SETEMBRO)).guardado_cents
-
-    assert disponivel > 0
-    assert disponivel + guardado <= to_cents(2952.21) + guardado, "sem inventar dinheiro"
     plano = budget.get_month_plan(session, SETEMBRO)
-    consumo = sum(
-        plano.planejado.get(v.id, 0)
-        for v in plano.categorias
-        if v.behavior.is_monthly_budget
+
+    assert budget.nao_separado_no_mes(session, SETEMBRO) == plano.base_cents, (
+        "nada confirmado ainda: tudo esta por distribuir"
     )
-    assert disponivel == consumo, "nada foi gasto ainda"
+
+    budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
+    confirmado = _linha(session, SETEMBRO, "viagem").separado_cents
+
+    assert budget.nao_separado_no_mes(session, SETEMBRO) == (
+        plano.base_cents - confirmado
+    )
+
+
+def test_separar_tudo_zera_o_nao_separado(
+    session: Session, receita, cats
+) -> None:
+    """Confirmando todas as categorias, nenhum centavo sobra sem destino."""
+    receita(2952.21, mes=SETEMBRO)
+    for vista in cat.resolve_active(session, SETEMBRO):
+        budget.confirmar_separacao(session, SETEMBRO, vista.id)
+
+    assert budget.nao_separado_no_mes(session, SETEMBRO) == 0

@@ -58,6 +58,9 @@ class SeparacaoLinha:
     planejado_cents: int
     separado_cents: int
     confirmed_revision: int | None
+    #: Saldo acumulado da categoria no fim do mês. Vem do histórico, e não
+    #: do planejado: é dinheiro que existe, não que se pretende separar.
+    saldo_cents: int = 0
 
     @property
     def falta_cents(self) -> int:
@@ -79,41 +82,16 @@ class SeparacaoLinha:
         """Rótulo de status para a interface."""
         if self.planejado_cents == 0 and self.separado_cents == 0:
             return "Sem valor"
+        if self.excedente_cents:
+            # Acontece quando uma receita é reduzida depois da separação: o
+            # dinheiro já saiu, e apagá-lo sozinho seria inventar um
+            # movimento que não houve.
+            return "Excedente"
         if self.feito:
             return "Feito"
         if self.separado_cents > 0:
             return "Parcial"
         return "Pendente"
-
-
-@dataclass(frozen=True)
-class GastoLinha:
-    """Uma categoria de orçamento mensal de consumo."""
-
-    categoria: CategoryView
-    orcamento_cents: int
-    gasto_cents: int
-    #: Saldo herdado do mês anterior. Positivo se sobrou, negativo se
-    #: estourou — a sobra do mês passado é dinheiro deste mês.
-    vem_de_antes_cents: int = 0
-    #: Efeito das transferências no mês: recebeu de outra categoria, ou
-    #: cedeu para cobrir o estouro de outra.
-    transferido_cents: int = 0
-
-    @property
-    def disponivel_cents(self) -> int:
-        """Tudo que dá para gastar; negativo quando estourou."""
-        return (
-            self.vem_de_antes_cents
-            + self.orcamento_cents
-            + self.transferido_cents
-            - self.gasto_cents
-        )
-
-    @property
-    def estourou(self) -> bool:
-        """Se o gasto passou do orçamento."""
-        return self.disponivel_cents < 0
 
 
 @dataclass(frozen=True)
@@ -168,7 +146,8 @@ class MonthPlan:
     categorias: list[CategoryView]
     planejado: dict[int, int]
     separacoes: list[SeparacaoLinha] = field(default_factory=list)
-    gastos: list[GastoLinha] = field(default_factory=list)
+    #: Mantido vazio: a lista por categoria é `separacoes`.
+    gastos: list = field(default_factory=list)
     sobra_meta_cents: int = 0
 
     @property
@@ -406,8 +385,6 @@ def _montar_plano(session: Session, alvo: date) -> MonthPlan:
 
     separacoes: list[SeparacaoLinha] = []
     for vista in vistas:
-        if not vista.requires_separation:
-            continue
         estado = repo.get_allocation(session, alvo, vista.id)
         separado = estado.separated_cents if estado else 0
         # Categoria desativada só continua aparecendo se ainda tiver valor
@@ -420,20 +397,13 @@ def _montar_plano(session: Session, alvo: date) -> MonthPlan:
                 planejado_cents=planejado.get(vista.id, 0),
                 separado_cents=separado,
                 confirmed_revision=(estado.confirmed_revision if estado else None),
+                saldo_cents=historico.saldo_em(alvo, vista.id),
             )
         )
 
-    gastos = [
-        GastoLinha(
-            categoria=vista,
-            orcamento_cents=planejado.get(vista.id, 0),
-            gasto_cents=repo.sum_expenses(session, periodo, category_id=vista.id),
-            vem_de_antes_cents=historico.do_mes(alvo, vista.id).inicial_cents,
-            transferido_cents=historico.do_mes(alvo, vista.id).transferencia_cents,
-        )
-        for vista in vistas
-        if vista.is_monthly_budget and vista.active
-    ]
+    # Não existe mais "orçamento do mês" separado do resto: toda categoria
+    # tem percentual, separação e saldo, e aparece na mesma lista.
+    gastos: list[SeparacaoLinha] = []
 
     return MonthPlan(
         month=alvo,
@@ -547,13 +517,8 @@ def ajustar_separacao(
 def envelopes(session: Session, period: Period) -> list[EnvelopeLinha]:
     """Saldo acumulado de cada envelope no fim do período."""
     fim = period.end
-    # A seção é dos envelopes de gasto acumulativo. Consumo mensal também
-    # guarda a sobra, mas aparece no orçamento do mês com a linha do que
-    # veio de trás; reserva e investimentos aparecem no patrimônio. Repetir
-    # qualquer um deles aqui mostraria o mesmo dinheiro duas vezes.
-    vistas = [
-        v for v in cat.resolve_active(session, fim) if v.behavior.accumulates
-    ]
+    # Toda categoria acumula, então a lista é simplesmente a das ativas.
+    vistas = cat.resolve_active(session, fim)
     return [
         EnvelopeLinha(
             categoria=vista,
@@ -680,11 +645,10 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
     # Entram todas as categorias que retêm saldo entre meses; a marca
     # ``include_in_net_worth`` decide depois quais somam no patrimônio. Assim
     # os dois números saem da mesma leitura, e nunca discordam.
-    vistas = [
-        v
-        for v in cat.resolve_active(session, posicao)
-        if v.behavior.requires_separation
-    ]
+    # Toda categoria guarda saldo, então todas entram no "dinheiro
+    # guardado". A marca ``include_in_net_worth`` decide depois quais
+    # somam no patrimônio — ver ``total_cents``.
+    vistas = cat.resolve_active(session, posicao)
     parcelas = [
         ParcelaPatrimonio(
             categoria=v,
@@ -701,15 +665,25 @@ def get_patrimonio(session: Session, period: Period) -> Patrimonio:
     )
 
 
-def disponivel_no_mes(session: Session, month: date) -> int:
-    """O que dá para gastar nas categorias de consumo, no mês em foco.
+def nao_separado_no_mes(session: Session, month: date) -> int:
+    """Dinheiro que entrou no mês e ainda não foi distribuído.
 
-    Já inclui o que veio dos meses anteriores: a sobra do orçamento não
-    evapora na virada, e um estouro segue como saldo negativo até ser
-    coberto.
+    É a diferença entre a base do orçamento e o que foi de fato confirmado
+    nas categorias daquele mês. Não é categoria nenhuma: é o dinheiro que
+    está na conta sem destino declarado — e existe justamente para que
+    nenhum centavo fique invisível entre o "recebi" e o "separei".
+
+    Nunca é negativo: separar mais do que entrou no mês é possível (vem de
+    saldo anterior), e isso não significa dinheiro não distribuído.
     """
     plano = get_month_plan(session, month_start(month))
-    return sum(linha.disponivel_cents for linha in plano.gastos)
+    confirmado = sum(linha.separado_cents for linha in plano.separacoes)
+    return max(0, plano.base_cents - confirmado)
+
+
+def disponivel_no_mes(session: Session, month: date) -> int:
+    """Mantido pelo nome antigo; o conceito virou :func:`nao_separado_no_mes`."""
+    return nao_separado_no_mes(session, month)
 
 
 def serie_patrimonio(session: Session, meses: list[date]) -> list[tuple[date, int]]:
@@ -732,8 +706,8 @@ class ResumoPeriodo:
     gasto_cents: int
     dividendos_cents: int
     patrimonio: Patrimonio
-    #: Sobra do orçamento de consumo na posição do patrimônio.
-    disponivel_cents: int = 0
+    #: Dinheiro recebido no mês que ainda não foi distribuído.
+    nao_separado_cents: int = 0
 
     @property
     def dinheiro_total_cents(self) -> int:
@@ -743,7 +717,7 @@ class ResumoPeriodo:
         orçamento do mês. Não conhece o extrato do banco: só o que foi
         registrado aqui.
         """
-        return self.patrimonio.guardado_cents + self.disponivel_cents
+        return self.patrimonio.guardado_cents + self.nao_separado_cents
 
 
 def get_resumo_periodo(session: Session, period: Period) -> ResumoPeriodo:
@@ -760,7 +734,7 @@ def get_resumo_periodo(session: Session, period: Period) -> ResumoPeriodo:
         gasto_cents=repo.sum_expenses(session, period),
         dividendos_cents=repo.sum_dividends(session, period),
         patrimonio=patrimonio,
-        disponivel_cents=disponivel_no_mes(session, patrimonio.posicao),
+        nao_separado_cents=nao_separado_no_mes(session, patrimonio.posicao),
     )
 
 
@@ -801,9 +775,9 @@ def transferir(
     origem, destino = vistas.get(origem_id), vistas.get(destino_id)
     if origem is None or destino is None:
         raise TransferenciaInvalida("Categoria não encontrada neste mês.")
-    if not destino.accumulates and not destino.is_monthly_budget:
+    if not destino.active:
         raise TransferenciaInvalida(
-            f"{destino.name} não guarda saldo, então não pode receber dinheiro."
+            f"{destino.name} está desativada e não pode receber dinheiro."
         )
 
     repo.criar_transferencia(

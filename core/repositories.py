@@ -17,7 +17,9 @@ from . import cache
 from . import escopo
 from . import categories as cat
 from .models import (
+    AdjustmentKind,
     AllocationState,
+    BalanceAdjustment,
     Category,
     CategoryVersion,
     Expense,
@@ -879,3 +881,55 @@ def excluir_transferencia(session: Session, transfer_id: int) -> None:
         session.delete(transferencia)
         session.flush()
         cache.limpar(session)
+
+
+def ajustes_por_mes_e_categoria(session: Session) -> dict[tuple[date, int], int]:
+    """Correções de saldo por categoria e mês, numa consulta só."""
+
+    def calcular() -> dict[tuple[date, int], int]:
+        consulta = select(
+            BalanceAdjustment.month,
+            BalanceAdjustment.category_id,
+            func.sum(BalanceAdjustment.amount_cents),
+        ).group_by(BalanceAdjustment.month, BalanceAdjustment.category_id)
+        return {
+            (mes, cid): int(total or 0) for mes, cid, total in session.execute(consulta)
+        }
+
+    return cache.obter(session, "ajustes_por_mes_categoria", calcular)
+
+
+def criar_ajuste(
+    session: Session,
+    *,
+    month: date,
+    category_id: int,
+    amount_cents: int,
+    kind: AdjustmentKind = AdjustmentKind.MANUAL,
+    note: str | None = None,
+) -> BalanceAdjustment:
+    """Registra a diferença entre o saldo calculado e o real informado."""
+    if amount_cents == 0:
+        raise ValueError("Um ajuste de zero não explica nada.")
+    ajuste = BalanceAdjustment(
+        month=month_start(month),
+        category_id=category_id,
+        amount_cents=amount_cents,
+        kind=kind,
+        note=note,
+    )
+    session.add(ajuste)
+    session.flush()
+    cache.limpar(session)
+    return ajuste
+
+
+def list_ajustes(session: Session, period: Period) -> list[BalanceAdjustment]:
+    """Ajustes do período, do mais recente para o mais antigo."""
+    return list(
+        session.scalars(
+            select(BalanceAdjustment)
+            .where(BalanceAdjustment.month.in_(period.months))
+            .order_by(BalanceAdjustment.created_at.desc())
+        )
+    )

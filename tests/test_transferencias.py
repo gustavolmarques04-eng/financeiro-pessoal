@@ -108,9 +108,10 @@ def test_cobertura_zera_o_negativo_da_categoria(
     receita(1000.00, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
 
-    orcado = budget.get_month_plan(session, SETEMBRO).planejado.get(cats["livre"], 0)
+    budget.confirmar_separacao(session, SETEMBRO, cats["livre"])
+    separado = _saldo(session, "livre", cats)
     excesso = to_cents(40)
-    gasto(float(orcado + excesso) / 100, cats["livre"], mes=SETEMBRO)
+    gasto(float(separado + excesso) / 100, cats["livre"], mes=SETEMBRO)
 
     assert _saldo(session, "livre", cats) == -excesso
 
@@ -152,16 +153,14 @@ def test_estouro_sem_cobertura_segue_negativo_para_o_mes_seguinte(
     receita(1000.00, mes=SETEMBRO)
     receita(1000.00, mes=OUTUBRO)
 
-    orcado = budget.get_month_plan(session, SETEMBRO).planejado.get(cats["livre"], 0)
-    gasto(float(orcado + to_cents(30)) / 100, cats["livre"], mes=SETEMBRO)
+    budget.confirmar_separacao(session, SETEMBRO, cats["livre"])
+    separado = _saldo(session, "livre", cats)
+    gasto(float(separado + to_cents(30)) / 100, cats["livre"], mes=SETEMBRO)
 
-    outubro = next(
-        linha
-        for linha in budget.get_month_plan(session, OUTUBRO).gastos
-        if linha.categoria.slug == "livre"
+    assert _saldo(session, "livre", cats) == -to_cents(30)
+    assert _saldo(session, "livre", cats, OUTUBRO) == -to_cents(30), (
+        "a divida atravessa o mes"
     )
-
-    assert outubro.vem_de_antes_cents == -to_cents(30)
 
 
 def test_apagar_o_gasto_desfaz_a_cobertura(
@@ -171,9 +170,10 @@ def test_apagar_o_gasto_desfaz_a_cobertura(
     receita(1000.00, mes=SETEMBRO)
     budget.confirmar_separacao(session, SETEMBRO, cats["viagem"])
 
-    orcado = budget.get_month_plan(session, SETEMBRO).planejado.get(cats["livre"], 0)
+    budget.confirmar_separacao(session, SETEMBRO, cats["livre"])
+    separado = _saldo(session, "livre", cats)
     excesso = to_cents(40)
-    compra = gasto(float(orcado + excesso) / 100, cats["livre"], mes=SETEMBRO)
+    compra = gasto(float(separado + excesso) / 100, cats["livre"], mes=SETEMBRO)
 
     budget.transferir(
         session,
@@ -190,4 +190,4 @@ def test_apagar_o_gasto_desfaz_a_cobertura(
     assert _saldo(session, "viagem", cats) == viagem_coberta + excesso, (
         "o dinheiro emprestado tem de voltar para quem cobriu"
     )
-    assert _saldo(session, "livre", cats) == orcado
+    assert _saldo(session, "livre", cats) == separado
