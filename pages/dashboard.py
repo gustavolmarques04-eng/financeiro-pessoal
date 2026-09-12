@@ -61,6 +61,9 @@ with session_scope() as session:
     plano = budget.get_month_plan(session, mes_ref)
     resumo_sep = budget.resumo_separacoes(session, mes_ref)
     metas = budget.metas(session, periodo)
+    tem_investimentos = (
+        investimentos.categoria_de_investimento(session, mes_ref) is not None
+    )
 
     if periodo.is_year:
         receitas_mes = repo.incomes_by_month(session, periodo)
@@ -97,24 +100,32 @@ apoio_resultado = (
     else "aguardando o fechamento"
 )
 
-mostrar_cartoes(
-    [
-        (
-            "Recebido",
-            dinheiro(resumo.recebido_cents),
-            f"base do rateio: {dinheiro(resumo.base_cents)}"
-            if resumo.base_cents != resumo.recebido_cents
-            else periodo.label,
-            "",
-        ),
-        ("Gasto", dinheiro(resumo.gasto_cents), periodo.label, ""),
-        (
-            "Todo o dinheiro",
-            dinheiro(resumo.dinheiro_total_cents),
-            apoio_total,
-            "",
-        ),
-        ("Patrimônio", dinheiro(resumo.patrimonio.total_cents), apoio_patrimonio, ""),
+# No celular os cartões empilham; a ordem aqui é a ordem em que eles
+# aparecem na tela pequena, e por isso começa pelo que se olha primeiro.
+cartoes = [
+    (
+        "Recebido",
+        dinheiro(resumo.recebido_cents),
+        f"base do rateio: {dinheiro(resumo.base_cents)}"
+        if resumo.base_cents != resumo.recebido_cents
+        else periodo.label,
+        "",
+    ),
+    ("Gasto", dinheiro(resumo.gasto_cents), periodo.label, ""),
+    ("Patrimônio", dinheiro(resumo.patrimonio.total_cents), apoio_patrimonio, ""),
+    (
+        "Todo o dinheiro",
+        dinheiro(resumo.dinheiro_total_cents),
+        apoio_total,
+        "",
+    ),
+]
+
+# O resultado dos investimentos só faz sentido para quem apontou uma
+# categoria como sendo os seus investimentos. Para os demais, seria um
+# cartão permanentemente vazio ocupando a tela.
+if tem_investimentos:
+    cartoes.append(
         (
             "Resultado dos investimentos",
             dinheiro(resumo_inv.resultado_cents)
@@ -124,14 +135,24 @@ mostrar_cartoes(
             ("negativo" if resumo_inv.resultado_cents < 0 else "positivo")
             if resumo_inv.informado
             else "",
-        ),
-    ]
-)
+        )
+    )
+
+mostrar_cartoes(cartoes)
 
 
 # --------------------------------------------------------------------------
 # Aviso de separações (mesmo service da página Separações)
 # --------------------------------------------------------------------------
+if periodo.is_month and resumo.nao_separado_cents:
+    # Dinheiro que entrou e ainda não foi distribuído. Não é categoria: é
+    # o que está na conta sem destino declarado, e existe para que nenhum
+    # centavo fique invisível entre o "recebi" e o "separei".
+    st.info(
+        f"{dinheiro(resumo.nao_separado_cents)} ainda não separado.",
+        icon="💸",
+    )
+
 if periodo.is_month and resumo_sep.total:
     if resumo_sep.tudo_feito:
         st.success(
@@ -151,6 +172,8 @@ if periodo.is_month and resumo_sep.total:
 # --------------------------------------------------------------------------
 # Registrar gasto (mesmo formulário e service da página Gastos)
 # --------------------------------------------------------------------------
+# Registrar gasto é a ação mais frequente no celular, então fica logo
+# abaixo dos números — aberta com um toque, sem procurar.
 with st.expander("➕ Registrar gasto", expanded=False):
     if formulario_gasto(
         "home", mes_referencia=mes_ref, rotulo_botao="Salvar gasto", compacto=True

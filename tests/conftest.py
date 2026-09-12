@@ -18,7 +18,7 @@ if str(RAIZ) not in sys.path:
 from core import auth  # noqa: E402
 from core import categories as cat  # noqa: E402
 from core import repositories as repo  # noqa: E402
-from core.database import seed_defaults  # noqa: E402
+from .seeds import seed_categories  # noqa: E402
 from core.models import Base, IncomeType, PaymentMethod  # noqa: E402
 from core.period import Period  # noqa: E402
 from core.utils import to_cents  # noqa: E402
@@ -60,7 +60,7 @@ def session(tmp_path: Path, usuario: auth.Usuario) -> Session:
     Base.metadata.create_all(engine)
     fabrica = sessionmaker(bind=engine, expire_on_commit=False)
     sessao = fabrica()
-    seed_defaults(sessao)
+    seed_categories(sessao)
     sessao.commit()
 
     try:

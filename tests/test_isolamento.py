@@ -21,7 +21,7 @@ from core import budget_service as budget
 from core import categories as cat
 from core import escopo
 from core import repositories as repo
-from core.database import seed_defaults
+from .seeds import seed_categories
 from core.models import Base, Category, Expense, Income, IncomeType, PaymentMethod
 from core.period import Period
 from core.utils import to_cents
@@ -49,7 +49,7 @@ def dois_usuarios(tmp_path: Path):
     for usuario in (a, b):
         auth.definir_atual(usuario)
         with fabrica() as preparo:
-            seed_defaults(preparo)
+            seed_categories(preparo)
             preparo.commit()
 
     try:

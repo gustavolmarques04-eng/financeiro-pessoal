@@ -20,8 +20,6 @@ from sqlalchemy.orm import Session
 
 from . import cache
 from .models import (
-    SEED_CATEGORIES,
-    SEED_EFFECTIVE_MONTH,
     AllocationState,
     Category,
     CategoryBehavior,
@@ -108,62 +106,6 @@ def slugify(texto: str) -> str:
     return limpo or "categoria"
 
 
-def seed_categories(session: Session) -> None:
-    """Cria as categorias iniciais, se ainda não existirem."""
-    if session.scalar(select(func.count()).select_from(Category)):
-        return
-
-    criadas: dict[str, Category] = {}
-    for dados in SEED_CATEGORIES:
-        categoria = Category(slug=str(dados["slug"]))
-        session.add(categoria)
-        criadas[categoria.slug] = categoria
-    session.flush()
-
-    for dados in SEED_CATEGORIES:
-        slug_overflow = dados.get("overflow_target_slug")
-        session.add(
-            CategoryVersion(
-                category_id=criadas[str(dados["slug"])].id,
-                effective_month=SEED_EFFECTIVE_MONTH,
-                name=str(dados["name"]),
-                emoji=dados.get("emoji"),  # type: ignore[arg-type]
-                behavior=dados["behavior"],  # type: ignore[arg-type]
-                percent_bp=int(dados["percent_bp"]),  # type: ignore[arg-type]
-                display_order=int(dados["display_order"]),  # type: ignore[arg-type]
-                active=True,
-                target_amount_cents=dados.get("target_amount_cents"),  # type: ignore[arg-type]
-                overflow_target_category_id=(
-                    criadas[str(slug_overflow)].id if slug_overflow else None
-                ),
-                counts_as_investment_capital=bool(
-                    dados.get("counts_as_investment_capital", False)
-                ),
-                include_in_net_worth=bool(dados.get("include_in_net_worth", False)),
-                accumulates_balance=bool(
-                    dados.get(
-                        "accumulates_balance",
-                        dados["behavior"].acumula_por_padrao,  # type: ignore[union-attr]
-                    )
-                ),
-                balance_from_closing=dados.get("balance_from_closing"),  # type: ignore[arg-type]
-            )
-        )
-        saldo = int(dados.get("opening_balance_cents", 0))  # type: ignore[arg-type]
-        if saldo:
-            session.add(
-                OpeningBalance(
-                    category_id=criadas[str(dados["slug"])].id,
-                    amount_cents=saldo,
-                    note="Saldo anterior ao uso do aplicativo",
-                )
-            )
-    session.flush()
-
-
-# --------------------------------------------------------------------------
-# Resolução por mês
-# --------------------------------------------------------------------------
 def _to_view(versao: CategoryVersion, slug: str, mes: date) -> CategoryView:
     """Converte uma versão persistida na visão imutável usada pelo app."""
     return CategoryView(

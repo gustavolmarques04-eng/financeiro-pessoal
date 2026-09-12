@@ -92,6 +92,14 @@ CSS = f"""
   .stButton > button {{ min-height: 2.6rem; border-radius: 9px; }}
   div[data-testid="stForm"] .stButton > button {{ width: 100%; }}
 
+  /* A página nunca rola de lado. Conteúdo largo (tabela, gráfico) rola
+     dentro do próprio quadro, que é o comportamento esperado no celular:
+     arrastar a tabela, e não a tela inteira. */
+  html, body {{ overflow-x: hidden; }}
+  div[data-testid="stDataFrame"], .stPlotlyChart {{
+    max-width: 100%; overflow-x: auto;
+  }}
+
   /* Telas pequenas: colunas viram uma coluna só, sem zoom horizontal */
   @media (max-width: 640px) {{
     .block-container {{ padding-left: 0.75rem; padding-right: 0.75rem; padding-top: 2.6rem; }}

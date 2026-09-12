@@ -17,7 +17,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import auth, escopo, settings  # noqa: F401  (escopo instala os ganchos)
-from .categories import seed_categories
 from .models import Base
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -114,11 +113,6 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
-
-
-def seed_defaults(session: Session) -> None:
-    """Garante as categorias iniciais na primeira execução."""
-    seed_categories(session)
 
 
 def sqlite_file() -> Path | None:

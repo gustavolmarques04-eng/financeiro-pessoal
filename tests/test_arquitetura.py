@@ -341,3 +341,103 @@ def test_custo_por_clique_nao_cresce_com_o_historico() -> None:
         f"um mês de histórico custa {um_mes} consultas e dez anos custam "
         f"{dez_anos}: o cálculo voltou a perguntar ao banco mês a mês"
     )
+
+
+def test_nenhuma_regra_compara_nome_de_categoria() -> None:
+    """Regra de negócio não pode reconhecer nome de categoria.
+
+    Cada usuário nomeia as categorias dele como quiser. Se o código
+    procurasse por "Reserva" ou "Independência", o app funcionaria para
+    quem usasse essas palavras e falharia silenciosamente para todo mundo
+    mais — inclusive para a segunda pessoa que usa o aplicativo.
+
+    O que este teste procura é o padrão exato que seria o defeito:
+    comparar ``algo.name`` ou ``algo.slug`` com um texto fixo. Nomes soltos
+    em mensagens e rótulos de tela são outra coisa, e continuam liberados.
+    """
+    import ast
+
+    ofensas: list[str] = []
+    for pasta in ("core", "pages", "ui"):
+        for caminho in sorted((RAIZ / pasta).rglob("*.py")):
+            arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+            for no in ast.walk(arvore):
+                if not isinstance(no, ast.Compare):
+                    continue
+                lados = [no.left, *no.comparators]
+                atributos = [
+                    lado
+                    for lado in lados
+                    if isinstance(lado, ast.Attribute)
+                    and lado.attr in {"name", "slug"}
+                    # ``dialect.name`` é o nome do banco, não de categoria.
+                    and not (
+                        isinstance(lado.value, ast.Attribute)
+                        and lado.value.attr == "dialect"
+                    )
+                ]
+                textos = [
+                    lado
+                    for lado in lados
+                    if isinstance(lado, ast.Constant) and isinstance(lado.value, str)
+                ]
+                if atributos and textos:
+                    ofensas.append(
+                        f"{pasta}/{caminho.name}:{no.lineno} → "
+                        f"{atributos[0].attr} comparado com {textos[0].value!r}"
+                    )
+
+    assert not ofensas, "regra de negócio comparando nome de categoria: " + "; ".join(
+        ofensas
+    )
+
+
+def test_nenhuma_categoria_de_exemplo_no_codigo_de_producao() -> None:
+    """As categorias de exemplo vivem nos testes, não no aplicativo.
+
+    O app não cria categoria nenhuma sozinho: cada pessoa monta a divisão
+    dela no primeiro acesso. Uma lista de categorias em ``core/`` seria um
+    padrão escondido — e daria às duas pessoas as mesmas categorias.
+    """
+    for pasta in ("core", "pages", "ui"):
+        for caminho in sorted((RAIZ / pasta).rglob("*.py")):
+            texto = caminho.read_text(encoding="utf-8")
+            assert "SEED_CATEGORIES" not in texto, (
+                f"{pasta}/{caminho.name} voltou a trazer categorias prontas"
+            )
+
+
+def test_paginas_nao_fazem_conta_de_dinheiro() -> None:
+    """Página recebe, chama service e mostra. Não calcula.
+
+    Uma soma escrita na tela é uma segunda fonte da verdade: no dia em que
+    a regra mudar no service, aquela tela continuará mostrando o número
+    antigo — e duas telas passarão a discordar sobre quanto dinheiro
+    existe.
+    """
+    import ast
+
+    suspeitos: list[str] = []
+    for caminho in sorted((RAIZ / "pages").rglob("*.py")):
+        arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+        for no in ast.walk(arvore):
+            # Aritmética entre dois campos em centavos é o sintoma.
+            if not isinstance(no, ast.BinOp):
+                continue
+            if not isinstance(no.op, (ast.Add, ast.Sub, ast.Mult)):
+                continue
+            lados = [no.left, no.right]
+            em_centavos = [
+                lado
+                for lado in lados
+                if isinstance(lado, ast.Attribute) and lado.attr.endswith("_cents")
+            ]
+            if len(em_centavos) >= 2:
+                suspeitos.append(
+                    f"pages/{caminho.name}:{no.lineno} → "
+                    f"{em_centavos[0].attr} e {em_centavos[1].attr}"
+                )
+
+    assert not suspeitos, (
+        "cálculo de dinheiro dentro de uma página: " + "; ".join(suspeitos)
+    )
