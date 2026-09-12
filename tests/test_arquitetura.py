@@ -9,6 +9,7 @@ categoria.
 from __future__ import annotations
 
 import re
+import uuid
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -239,6 +240,7 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
     from sqlalchemy import create_engine, event
     from sqlalchemy.orm import Session, sessionmaker
 
+    from core import auth
     from core import budget_service as budget
     from core import investment_service as inv
     from core import repositories as repo
@@ -246,6 +248,9 @@ def test_render_do_dashboard_nao_estoura_o_orcamento_de_consultas() -> None:
     from core.models import Base
     from core.period import Period
 
+    auth.definir_atual(
+        auth.Usuario(id=uuid.uuid4(), email="arq@financeiro.local", login="arq")
+    )
     engine = create_engine("sqlite://")  # em memória
     Base.metadata.create_all(engine)
     fabrica = sessionmaker(bind=engine)
@@ -291,12 +296,17 @@ def test_custo_por_clique_nao_cresce_com_o_historico() -> None:
     from sqlalchemy import create_engine, event
     from sqlalchemy.orm import sessionmaker
 
+    from core import auth
     from core import budget_service as budget
     from core import repositories as repo
     from core.database import seed_defaults
     from core.models import Base, IncomeType
     from core.period import Period
     from core.utils import add_months
+
+    auth.definir_atual(
+        auth.Usuario(id=uuid.uuid4(), email="arq@financeiro.local", login="arq")
+    )
 
     def medir(meses: int) -> int:
         engine = create_engine("sqlite://")
@@ -335,3 +345,37 @@ def test_custo_por_clique_nao_cresce_com_o_historico() -> None:
         f"um mês de histórico custa {um_mes} consultas e dez anos custam "
         f"{dez_anos}: o cálculo voltou a perguntar ao banco mês a mês"
     )
+
+
+def test_toda_pagina_exige_login_antes_de_qualquer_coisa() -> None:
+    """``require_auth()`` tem de ser a primeira instrução executada.
+
+    Não basta chamar em algum lugar: se qualquer código rodar antes, os
+    valores podem chegar a ser lidos e desenhados, e o "sem login não
+    aparece nada" vira "aparece por um instante".
+    """
+    import ast
+
+    paginas = sorted((RAIZ / "pages").glob("*.py"))
+    assert paginas, "nenhuma página encontrada"
+
+    for caminho in paginas:
+        arvore = ast.parse(caminho.read_text(encoding="utf-8"))
+        executaveis = [
+            no
+            for no in arvore.body
+            if not isinstance(no, (ast.Import, ast.ImportFrom))
+            and not (isinstance(no, ast.Expr) and isinstance(no.value, ast.Constant))
+        ]
+        assert executaveis, f"{caminho.name} não executa nada"
+
+        primeira = executaveis[0]
+        chamou = (
+            isinstance(primeira, ast.Assign)
+            and isinstance(primeira.value, ast.Call)
+            and getattr(primeira.value.func, "id", "") == "require_auth"
+        )
+        assert chamou, (
+            f"{caminho.name}: a primeira instrução é "
+            f"{ast.dump(primeira)[:60]}, e não require_auth()"
+        )

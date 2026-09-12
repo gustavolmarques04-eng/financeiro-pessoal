@@ -28,6 +28,12 @@ from ui.shared import (
     valor_colorido,
 )
 
+from ui.login import require_auth
+
+# Antes de qualquer leitura do banco: sem usuário, a página nem começa.
+usuario = require_auth()
+
+
 configurar_pagina("Gastos")
 garantir_banco()
 

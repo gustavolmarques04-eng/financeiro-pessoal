@@ -14,6 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from . import cache
+from . import escopo
 from . import categories as cat
 from .models import (
     AllocationState,
@@ -27,7 +28,7 @@ from .models import (
     MonthRevision,
     OpeningBalance,
     PaymentMethod,
-    Transfer,
+    CategoryTransfer,
 )
 from .period import Period
 from .utils import add_months, month_start, split_installments
@@ -38,7 +39,7 @@ from .utils import add_months, month_start, split_installments
 # --------------------------------------------------------------------------
 def get_revision(session: Session, month: date) -> int:
     """Revisão atual do plano do mês (1 quando ainda não houve alteração)."""
-    registro = session.get(MonthRevision, month_start(month))
+    registro = escopo.buscar(session, MonthRevision, month=month_start(month))
     return registro.revision if registro else 1
 
 
@@ -49,7 +50,7 @@ def bump_revision(session: Session, month: date) -> int:
     excluída, e configuração de categoria que passa a valer para o mês.
     """
     alvo = month_start(month)
-    registro = session.get(MonthRevision, alvo)
+    registro = escopo.buscar(session, MonthRevision, month=alvo)
     if registro is None:
         registro = MonthRevision(month=alvo, revision=2)
         session.add(registro)
@@ -103,7 +104,7 @@ def list_incomes(session: Session, period: Period) -> list[Income]:
 
 def get_income(session: Session, income_id: int) -> Income | None:
     """Uma receita pelo id."""
-    return session.get(Income, income_id)
+    return escopo.buscar(session, Income, id=income_id)
 
 
 def create_income(
@@ -145,7 +146,7 @@ def update_income(
     note: str | None = None,
 ) -> Income:
     """Atualiza uma receita, invalidando o mês de origem e o de destino."""
-    receita = session.get(Income, income_id)
+    receita = escopo.buscar(session, Income, id=income_id)
     if receita is None:
         raise ValueError(f"Receita {income_id} não encontrada.")
 
@@ -167,7 +168,7 @@ def update_income(
 
 def delete_income(session: Session, income_id: int) -> None:
     """Remove uma receita e invalida o plano do mês."""
-    receita = session.get(Income, income_id)
+    receita = escopo.buscar(session, Income, id=income_id)
     if receita is None:
         return
     mes = receita.month
@@ -286,7 +287,7 @@ def update_expense(
     note: str | None = None,
 ) -> Expense:
     """Atualiza uma compra e recalcula as parcelas do zero."""
-    gasto = session.get(Expense, expense_id)
+    gasto = escopo.buscar(session, Expense, id=expense_id)
     if gasto is None:
         raise ValueError(f"Gasto {expense_id} não encontrado.")
     if installments_count < 1:
@@ -308,7 +309,7 @@ def update_expense(
 
 def delete_expense(session: Session, expense_id: int) -> None:
     """Remove a compra e, por cascata, todas as suas parcelas."""
-    gasto = session.get(Expense, expense_id)
+    gasto = escopo.buscar(session, Expense, id=expense_id)
     if gasto is None:
         return
     session.delete(gasto)
@@ -589,7 +590,7 @@ def upsert_closing(
 ) -> MonthlyClosing:
     """Cria ou atualiza o fechamento de um mês."""
     alvo = month_start(month)
-    fechamento = session.get(MonthlyClosing, alvo)
+    fechamento = escopo.buscar(session, MonthlyClosing, month=alvo)
     if fechamento is None:
         fechamento = MonthlyClosing(month=alvo)
         session.add(fechamento)
@@ -605,7 +606,7 @@ def upsert_closing(
 
 def delete_closing(session: Session, month: date) -> None:
     """Remove o fechamento de um mês."""
-    fechamento = session.get(MonthlyClosing, month_start(month))
+    fechamento = escopo.buscar(session, MonthlyClosing, month=month_start(month))
     if fechamento is not None:
         session.delete(fechamento)
         session.flush()
@@ -648,7 +649,7 @@ def set_opening_balance(
     session: Session, category_id: int, amount_cents: int, note: str | None = None
 ) -> OpeningBalance:
     """Define o saldo inicial de um envelope."""
-    registro = session.get(OpeningBalance, category_id)
+    registro = escopo.buscar(session, OpeningBalance, category_id=category_id)
     if registro is None:
         registro = OpeningBalance(
             category_id=category_id, amount_cents=amount_cents, note=note
@@ -798,10 +799,10 @@ def transferencias_por_mes_e_categoria(
         efeito: dict[tuple[date, int], int] = {}
         linhas = session.execute(
             select(
-                Transfer.month,
-                Transfer.from_category_id,
-                Transfer.to_category_id,
-                Transfer.amount_cents,
+                CategoryTransfer.month,
+                CategoryTransfer.from_category_id,
+                CategoryTransfer.to_category_id,
+                CategoryTransfer.amount_cents,
             )
         )
         for mes, origem, destino, valor in linhas:
@@ -835,19 +836,24 @@ def criar_transferencia(
     amount_cents: int,
     expense_id: int | None = None,
     note: str | None = None,
-) -> Transfer:
+    on: date | None = None,
+    reversal_of_id: int | None = None,
+) -> CategoryTransfer:
     """Registra dinheiro mudando de categoria."""
     if amount_cents <= 0:
         raise ValueError("A transferência precisa de um valor positivo.")
     if from_category_id == to_category_id:
         raise ValueError("Origem e destino precisam ser categorias diferentes.")
-    transferencia = Transfer(
+    quando = on or month_start(month)
+    transferencia = CategoryTransfer(
+        transfer_date=quando,
         month=month_start(month),
         from_category_id=from_category_id,
         to_category_id=to_category_id,
         amount_cents=amount_cents,
         expense_id=expense_id,
-        note=note,
+        description=note,
+        reversal_of_id=reversal_of_id,
     )
     session.add(transferencia)
     session.flush()
@@ -855,20 +861,20 @@ def criar_transferencia(
     return transferencia
 
 
-def list_transferencias(session: Session, period: Period) -> list[Transfer]:
+def list_transferencias(session: Session, period: Period) -> list[CategoryTransfer]:
     """Transferências do período, das mais recentes para as mais antigas."""
     return list(
         session.scalars(
-            select(Transfer)
-            .where(Transfer.month.in_(period.months))
-            .order_by(Transfer.created_at.desc())
+            select(CategoryTransfer)
+            .where(CategoryTransfer.month.in_(period.months))
+            .order_by(CategoryTransfer.created_at.desc())
         )
     )
 
 
 def excluir_transferencia(session: Session, transfer_id: int) -> None:
     """Desfaz uma transferência."""
-    transferencia = session.get(Transfer, transfer_id)
+    transferencia = escopo.buscar(session, CategoryTransfer, id=transfer_id)
     if transferencia is not None:
         session.delete(transferencia)
         session.flush()

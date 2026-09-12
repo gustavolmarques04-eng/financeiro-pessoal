@@ -24,6 +24,12 @@ from ui.shared import (
     seletor_periodo,
 )
 
+from ui.login import require_auth
+
+# Antes de qualquer leitura do banco: sem usuário, a página nem começa.
+usuario = require_auth()
+
+
 configurar_pagina("Receitas")
 garantir_banco()
 

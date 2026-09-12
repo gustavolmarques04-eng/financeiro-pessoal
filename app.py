@@ -4,13 +4,13 @@ Executar com::
 
     streamlit run app.py
 
-Se ``APP_PASSWORD`` estiver definida no ambiente, uma tela de senha aparece
-antes do aplicativo. Sem a variável, roda direto — o caso local.
+O acesso é por usuário e senha, verificados pelo Supabase Auth. Antes de
+entrar não existe menu, página nem consulta ao banco: a navegação só é
+montada depois que alguém se identifica.
 """
 
 from __future__ import annotations
 
-import hmac
 import sys
 from pathlib import Path
 
@@ -20,51 +20,20 @@ RAIZ = Path(__file__).resolve().parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from core import settings  # noqa: E402
 from core.database import init_db  # noqa: E402
+from ui.login import require_auth, sair  # noqa: E402
 from ui.shared import CSS  # noqa: E402
 
 
-def _senha_confere(digitada: str) -> bool:
-    """Compara a senha em tempo constante para não vazar informação."""
-    esperada = settings.app_password()
-    return bool(esperada) and hmac.compare_digest(digitada, esperada)
-
-
-def autenticar() -> bool:
-    """Mostra a tela de senha quando ``APP_PASSWORD`` está configurada.
-
-    Devolve ``True`` quando o acesso está liberado.
-    """
-    if not settings.app_password():
-        return True
-    if st.session_state.get("_autenticado"):
-        return True
-
-    st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown(
-        '<div class="fin-header"><h1>💰 Financeiro</h1>'
-        "<p>Aplicativo privado. Informe a senha para continuar.</p></div>",
-        unsafe_allow_html=True,
-    )
-
-    with st.form("login"):
-        senha = st.text_input("Senha", type="password")
-        entrar = st.form_submit_button("Entrar", use_container_width=True)
-
-    if entrar:
-        if _senha_confere(senha):
-            st.session_state["_autenticado"] = True
-            st.rerun()
-        else:
-            st.error("Senha incorreta.")
-    return False
-
-
 def main() -> None:
-    """Monta a navegação e entrega o controle à página escolhida."""
-    if not autenticar():
-        return
+    """Autentica e, só então, monta a navegação."""
+    st.set_page_config(
+        page_title="Financeiro", page_icon="💰", layout="centered"
+    )
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    # Nada acima desta linha lê dinheiro; nada abaixo dela roda sem dono.
+    usuario = require_auth()
 
     init_db()
 
@@ -76,6 +45,11 @@ def main() -> None:
         st.Page("pages/fechamento.py", title="Fechamento", icon="📅"),
         st.Page("pages/configuracoes.py", title="Configurações", icon="⚙️"),
     ]
+    with st.sidebar:
+        st.caption(f"Conectado como **{usuario.login}**")
+        if st.button("Sair", use_container_width=True):
+            sair()
+
     st.navigation(paginas, position="top").run()
 
 

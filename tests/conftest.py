@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +15,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
+from core import auth  # noqa: E402
 from core import categories as cat  # noqa: E402
 from core import repositories as repo  # noqa: E402
 from core.database import seed_defaults  # noqa: E402
@@ -27,8 +29,25 @@ NOVEMBRO = date(2026, 11, 1)
 
 
 @pytest.fixture()
-def session(tmp_path: Path) -> Session:
+def usuario() -> auth.Usuario:
+    """Dono descartável dos dados do teste.
+
+    Um id novo a cada teste: nenhum teste enxerga o que outro gravou, e
+    nenhum encosta nas contas reais.
+    """
+    return auth.Usuario(id=uuid.uuid4(), email="teste@financeiro.local", login="teste")
+
+
+@pytest.fixture()
+def outro_usuario() -> auth.Usuario:
+    """Segundo dono, para os testes de isolamento."""
+    return auth.Usuario(id=uuid.uuid4(), email="outro@financeiro.local", login="outro")
+
+
+@pytest.fixture()
+def session(tmp_path: Path, usuario: auth.Usuario) -> Session:
     """Sessão ligada a um SQLite temporário, já com as categorias iniciais."""
+    auth.definir_atual(usuario)
     caminho = tmp_path / "teste.db"
     engine = create_engine(f"sqlite:///{caminho.as_posix()}", future=True)
 
@@ -49,6 +68,7 @@ def session(tmp_path: Path) -> Session:
     finally:
         sessao.close()
         engine.dispose()
+        auth.definir_atual(None)
 
 
 @pytest.fixture()

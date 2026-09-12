@@ -10,11 +10,17 @@ Categorias têm identidade estável (:class:`Category`) e propriedades
 versionadas por mês (:class:`CategoryVersion`). Nada de regra de negócio
 depende do *nome* de uma categoria: o que manda é o comportamento e as
 propriedades declaradas na versão vigente.
+
+Cada linha financeira pertence a um usuário (``user_id``), e as chaves
+estrangeiras são **compostas** — ``(category_id, user_id)`` em vez de só
+``category_id``. Sem isso o banco aceitaria um gasto de um usuário apontando
+para a categoria de outro; com isso, é o próprio PostgreSQL que recusa.
 """
 
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
@@ -23,9 +29,11 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     UniqueConstraint,
+    Uuid,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -36,6 +44,16 @@ class Base(DeclarativeBase):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def coluna_do_dono() -> Mapped[uuid.UUID]:
+    """Coluna ``user_id`` presente em toda tabela financeira.
+
+    É o eixo de todo o isolamento: as policies de RLS comparam esta coluna
+    com ``auth.uid()``, e as chaves compostas a usam para impedir que uma
+    linha aponte para a categoria de outra pessoa.
+    """
+    return mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
 
 
 # --------------------------------------------------------------------------
@@ -156,7 +174,8 @@ class Category(Base):
     __tablename__ = "categories"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    slug: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    slug: Mapped[str] = mapped_column(String(60), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     versions: Mapped[list["CategoryVersion"]] = relationship(
@@ -164,6 +183,14 @@ class Category(Base):
         cascade="all, delete-orphan",
         order_by="CategoryVersion.effective_month",
         foreign_keys="CategoryVersion.category_id",
+    )
+
+    __table_args__ = (
+        # O slug identifica a categoria dentro do usuário: os dois podem ter
+        # uma "Viagem" sem colidir.
+        UniqueConstraint("user_id", "slug", name="uq_slug_por_usuario"),
+        # Alvo das chaves estrangeiras compostas das outras tabelas.
+        UniqueConstraint("id", "user_id", name="uq_categoria_do_usuario"),
     )
 
 
@@ -177,9 +204,8 @@ class CategoryVersion(Base):
     __tablename__ = "category_versions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    category_id: Mapped[int] = mapped_column(Integer, index=True)
     effective_month: Mapped[date] = mapped_column(Date, index=True)
 
     name: Mapped[str] = mapped_column(String(80))
@@ -195,7 +221,7 @@ class CategoryVersion(Base):
     target_amount_cents: Mapped[int | None] = mapped_column(Integer, default=None)
     #: Para onde vai a sobra quando a meta é atingida.
     overflow_target_category_id: Mapped[int | None] = mapped_column(
-        ForeignKey("categories.id", ondelete="SET NULL"), default=None
+        Integer, default=None
     )
     #: Se as separações desta categoria formam capital investido.
     counts_as_investment_capital: Mapped[bool] = mapped_column(default=False)
@@ -216,7 +242,22 @@ class CategoryVersion(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("category_id", "effective_month", name="uq_versao_por_mes"),
+        ForeignKeyConstraint(
+            ["category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="CASCADE",
+            name="fk_versao_categoria_do_usuario",
+        ),
+        # A categoria de destino da sobra também tem de ser do mesmo dono.
+        ForeignKeyConstraint(
+            ["overflow_target_category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="SET NULL",
+            name="fk_versao_destino_do_usuario",
+        ),
+        UniqueConstraint(
+            "user_id", "category_id", "effective_month", name="uq_versao_por_mes"
+        ),
         CheckConstraint("percent_bp >= 0", name="ck_percentual_nao_negativo"),
         CheckConstraint(
             "target_amount_cents IS NULL OR target_amount_cents >= 0",
@@ -243,6 +284,7 @@ class Income(Base):
     __tablename__ = "incomes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
     date: Mapped[date] = mapped_column(Date, index=True)
     month: Mapped[date] = mapped_column(Date, index=True)
     description: Mapped[str] = mapped_column(String(200))
@@ -272,11 +314,10 @@ class Expense(Base):
     __tablename__ = "expenses"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
     purchase_date: Mapped[date] = mapped_column(Date, index=True)
     description: Mapped[str] = mapped_column(String(200))
-    category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="RESTRICT"), index=True
-    )
+    category_id: Mapped[int] = mapped_column(Integer, index=True)
     total_cents: Mapped[int] = mapped_column(Integer)
     payment_method: Mapped[PaymentMethod] = mapped_column(
         Enum(PaymentMethod, native_enum=False, length=20)
@@ -293,6 +334,13 @@ class Expense(Base):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="RESTRICT",
+            name="fk_gasto_categoria_do_usuario",
+        ),
+        UniqueConstraint("id", "user_id", name="uq_gasto_do_usuario"),
         CheckConstraint("total_cents >= 0", name="ck_gasto_nao_negativo"),
         CheckConstraint("installments_count >= 1", name="ck_parcelas_minimo_um"),
     )
@@ -309,9 +357,8 @@ class ExpenseInstallment(Base):
     __tablename__ = "expense_installments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    expense_id: Mapped[int] = mapped_column(
-        ForeignKey("expenses.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    expense_id: Mapped[int] = mapped_column(Integer, index=True)
     number: Mapped[int] = mapped_column(Integer)
     month: Mapped[date] = mapped_column(Date, index=True)
     amount_cents: Mapped[int] = mapped_column(Integer)
@@ -319,6 +366,12 @@ class ExpenseInstallment(Base):
     expense: Mapped[Expense] = relationship(back_populates="installments")
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["expense_id", "user_id"],
+            ["expenses.id", "expenses.user_id"],
+            ondelete="CASCADE",
+            name="fk_parcela_gasto_do_usuario",
+        ),
         UniqueConstraint("expense_id", "number", name="uq_parcela_por_compra"),
         CheckConstraint("number >= 1", name="ck_numero_parcela_positivo"),
     )
@@ -333,6 +386,9 @@ class MonthRevision(Base):
 
     __tablename__ = "month_revisions"
 
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True
+    )
     month: Mapped[date] = mapped_column(Date, primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
@@ -349,16 +405,23 @@ class AllocationState(Base):
     __tablename__ = "allocation_states"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
     month: Mapped[date] = mapped_column(Date, index=True)
-    category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="RESTRICT"), index=True
-    )
+    category_id: Mapped[int] = mapped_column(Integer, index=True)
     separated_cents: Mapped[int] = mapped_column(Integer, default=0)
     confirmed_revision: Mapped[int | None] = mapped_column(Integer, default=None)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
 
     __table_args__ = (
-        UniqueConstraint("month", "category_id", name="uq_separacao_mes_categoria"),
+        ForeignKeyConstraint(
+            ["category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="RESTRICT",
+            name="fk_separacao_categoria_do_usuario",
+        ),
+        UniqueConstraint(
+            "user_id", "month", "category_id", name="uq_separacao_mes_categoria"
+        ),
         CheckConstraint("separated_cents >= 0", name="ck_separado_nao_negativo"),
     )
 
@@ -368,6 +431,9 @@ class MonthlyClosing(Base):
 
     __tablename__ = "monthly_closings"
 
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True
+    )
     month: Mapped[date] = mapped_column(Date, primary_key=True)
     reserva_cents: Mapped[int] = mapped_column(Integer, default=0)
     investimentos_cents: Mapped[int] = mapped_column(Integer, default=0)
@@ -394,46 +460,185 @@ class OpeningBalance(Base):
 
     __tablename__ = "opening_balances"
 
-    category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="CASCADE"), primary_key=True
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True
     )
+    category_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     amount_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="CASCADE",
+            name="fk_saldo_inicial_categoria_do_usuario",
+        ),
+    )
     note: Mapped[str | None] = mapped_column(String(300), default=None)
 
 
-class Transfer(Base):
+class CategoryTransfer(Base):
     """Dinheiro que mudou de categoria.
 
-    Nasce de duas situações: um gasto estourou o disponível e outra
-    categoria cobriu a diferença, ou você decidiu mandar a sobra de um mês
-    para outro lugar. Nos dois casos é o mesmo movimento — sai de uma,
-    entra na outra — e por isso é uma linha só.
+    Nasce de tres situacoes, todas o mesmo movimento por baixo: mandar a
+    sobra de uma categoria para outra, cobrir um gasto que estourou o
+    disponivel, e esvaziar uma categoria antes de desativa-la.
+
+    Transferencia nunca cria nem destroi dinheiro - o que sai de uma entra
+    na outra. Por isso nao se edita nem se apaga uma transferencia antiga:
+    corrige-se com um **estorno**, que e outra transferencia, no sentido
+    inverso, apontando para a original em ``reversal_of_id``.
     """
 
-    __tablename__ = "transfers"
+    __tablename__ = "category_transfers"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    #: Data escolhida por quem registrou.
+    transfer_date: Mapped[date] = mapped_column(Date, index=True)
+    #: Primeiro dia do mes de ``transfer_date``; e por ele que o saldo anda.
     month: Mapped[date] = mapped_column(Date, index=True)
-    from_category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="CASCADE"), index=True
-    )
-    to_category_id: Mapped[int] = mapped_column(
-        ForeignKey("categories.id", ondelete="CASCADE"), index=True
-    )
+    from_category_id: Mapped[int] = mapped_column(Integer, index=True)
+    to_category_id: Mapped[int] = mapped_column(Integer, index=True)
     amount_cents: Mapped[int] = mapped_column(Integer)
-    #: Preenchido quando a transferência cobre um gasto: apagar o gasto
+    description: Mapped[str | None] = mapped_column(String(200), default=None)
+    #: Preenchido quando a transferencia cobre um gasto: apagar o gasto
     #: desfaz a cobertura junto, em vez de deixar dinheiro perdido.
-    expense_id: Mapped[int | None] = mapped_column(
-        ForeignKey("expenses.id", ondelete="CASCADE"), default=None, index=True
-    )
-    note: Mapped[str | None] = mapped_column(String(200), default=None)
+    expense_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
+    #: Quando preenchido, esta linha e o estorno da transferencia apontada.
+    reversal_of_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["from_category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="CASCADE",
+            name="fk_transferencia_origem_do_usuario",
+        ),
+        # E esta constraint que impede uma transferencia de um usuario de
+        # ter como destino a categoria de outro: o par (id, user_id) nao
+        # existe na tabela de categorias dele.
+        ForeignKeyConstraint(
+            ["to_category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="CASCADE",
+            name="fk_transferencia_destino_do_usuario",
+        ),
+        ForeignKeyConstraint(
+            ["expense_id", "user_id"],
+            ["expenses.id", "expenses.user_id"],
+            ondelete="CASCADE",
+            name="fk_transferencia_gasto_do_usuario",
+        ),
+        UniqueConstraint("id", "user_id", name="uq_transferencia_do_usuario"),
+        # O estorno só pode apontar para uma transferência do mesmo dono.
+        ForeignKeyConstraint(
+            ["reversal_of_id", "user_id"],
+            ["category_transfers.id", "category_transfers.user_id"],
+            name="fk_estorno_do_usuario",
+        ),
         CheckConstraint("amount_cents > 0", name="ck_transferencia_positiva"),
         CheckConstraint(
             "from_category_id <> to_category_id",
             name="ck_transferencia_entre_diferentes",
+        ),
+    )
+
+
+class AdjustmentKind(str, enum.Enum):
+    """Por que o saldo foi corrigido."""
+
+    RENDIMENTO = "RENDIMENTO"
+    CORRECAO = "CORRECAO"
+    MANUAL = "MANUAL"
+    OUTRO = "OUTRO"
+
+    @property
+    def label(self) -> str:
+        """Nome legivel."""
+        return {
+            AdjustmentKind.RENDIMENTO: "Rendimento",
+            AdjustmentKind.CORRECAO: "Correcao",
+            AdjustmentKind.MANUAL: "Ajuste manual",
+            AdjustmentKind.OUTRO: "Outro",
+        }[self]
+
+
+class BalanceAdjustment(Base):
+    """Diferenca entre o saldo calculado e o saldo real informado.
+
+    Quando voce confere a conta e o banco mostra R$ 1.007,32 onde o app
+    calculava R$ 1.000, a diferenca nao sobrescreve o historico: vira uma
+    linha de +R$ 7,32 com um motivo. Assim cada centavo continua tendo
+    explicacao, e o rendimento nao e confundido com erro de digitacao.
+
+    ``amount_cents`` pode ser negativo: nem toda correcao e para cima.
+    """
+
+    __tablename__ = "balance_adjustments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    month: Mapped[date] = mapped_column(Date, index=True)
+    category_id: Mapped[int] = mapped_column(Integer, index=True)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[AdjustmentKind] = mapped_column(
+        Enum(AdjustmentKind, native_enum=False, length=20),
+        default=AdjustmentKind.MANUAL,
+    )
+    note: Mapped[str | None] = mapped_column(String(300), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="CASCADE",
+            name="fk_ajuste_categoria_do_usuario",
+        ),
+        CheckConstraint("amount_cents <> 0", name="ck_ajuste_nao_nulo"),
+    )
+
+
+class Profile(Base):
+    """Preferencias de quem usa o aplicativo.
+
+    Nao guarda senha nem e-mail: quem cuida disso e o Supabase Auth. Aqui
+    ficam apenas as escolhas do usuario, inclusive quais categorias ele
+    considera "seus investimentos" e "sua reserva" - guardadas por **id**,
+    nunca por nome, para que renomear nao quebre nenhum grafico.
+    """
+
+    __tablename__ = "profiles"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(String(80), default=None)
+    onboarding_completed: Mapped[bool] = mapped_column(default=False)
+    investment_category_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    reserve_category_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    #: Quanto do saldo da categoria de investimentos foi dinheiro aportado.
+    #: Serve de base para calcular ganho; nao altera saldo nenhum.
+    investment_cost_basis_cents: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["investment_category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="SET NULL",
+            name="fk_perfil_investimentos_do_usuario",
+        ),
+        ForeignKeyConstraint(
+            ["reserve_category_id", "user_id"],
+            ["categories.id", "categories.user_id"],
+            ondelete="SET NULL",
+            name="fk_perfil_reserva_do_usuario",
         ),
     )
 
@@ -444,9 +649,14 @@ class ImportLog(Base):
     __tablename__ = "import_log"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    source: Mapped[str] = mapped_column(String(120), unique=True)
+    user_id: Mapped[uuid.UUID] = coluna_do_dono()
+    source: Mapped[str] = mapped_column(String(120))
     detail: Mapped[str | None] = mapped_column(String(500), default=None)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "source", name="uq_import_por_usuario"),
+    )
 
 
 # --------------------------------------------------------------------------

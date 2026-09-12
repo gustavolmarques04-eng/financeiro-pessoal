@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from . import settings
+from . import auth, escopo, settings  # noqa: F401  (escopo instala os ganchos)
 from .categories import seed_categories
 from .models import Base
 
@@ -104,6 +104,9 @@ def session_scope() -> Iterator[Session]:
     """
     session = get_session_factory()()
     try:
+        # Toda transação declara ao banco quem está falando. É aqui, e só
+        # aqui, que a amarração acontece: nenhuma página precisa lembrar.
+        auth.amarrar_sessao(session, auth.atual())
         yield session
         session.commit()
     except Exception:
