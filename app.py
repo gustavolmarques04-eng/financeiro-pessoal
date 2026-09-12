@@ -22,7 +22,12 @@ if str(RAIZ) not in sys.path:
 
 from core import profile_service  # noqa: E402
 from core.database import init_db, session_scope  # noqa: E402
-from ui.login import require_auth, sair  # noqa: E402
+from ui.login import (  # noqa: E402
+    definir_usuario,
+    sair,
+    tela_de_login,
+    usuario_logado,
+)
 from ui.shared import CSS  # noqa: E402
 
 
@@ -33,8 +38,18 @@ def main() -> None:
     )
     st.markdown(CSS, unsafe_allow_html=True)
 
-    # Nada acima desta linha lê dinheiro; nada abaixo dela roda sem dono.
-    usuario = require_auth()
+    # Sem usuário, a navegação declarada é uma só: a tela de entrada.
+    # Declarar é indispensável — se ninguém chamar st.navigation, o
+    # Streamlit lista a pasta pages/ sozinho, e o menu financeiro inteiro
+    # aparece para quem nem entrou.
+    usuario = usuario_logado()
+    if usuario is None:
+        st.navigation([st.Page(tela_de_login, title="Entrar", icon="🔐")]).run()
+        return
+
+    # Reamarra o dono: o ContextVar vale por execução do script, e o
+    # Streamlit reexecuta a página inteira a cada clique.
+    definir_usuario(usuario)
 
     init_db()
 

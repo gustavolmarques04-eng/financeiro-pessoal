@@ -441,3 +441,42 @@ def test_paginas_nao_fazem_conta_de_dinheiro() -> None:
     assert not suspeitos, (
         "cálculo de dinheiro dentro de uma página: " + "; ".join(suspeitos)
     )
+
+
+def test_sem_login_a_navegacao_tem_uma_pagina_so() -> None:
+    """O menu financeiro não pode existir antes de alguém entrar.
+
+    Não basta cada página se proteger: se ninguém chamar ``st.navigation``,
+    o Streamlit monta sozinho um menu com a pasta ``pages/`` inteira. As
+    páginas continuariam bloqueadas ao serem abertas, mas a lista do que
+    existe já estaria à mostra — e o §2 pede que nem o menu apareça.
+
+    Foi assim que o defeito passou: ``require_auth()`` parava a execução
+    **antes** de a navegação ser declarada.
+    """
+    import ast
+
+    arvore = ast.parse((RAIZ / "app.py").read_text(encoding="utf-8"))
+    funcao = next(
+        no
+        for no in arvore.body
+        if isinstance(no, ast.FunctionDef) and no.name == "main"
+    )
+
+    chamadas_ate_o_primeiro_return: list[str] = []
+    for no in ast.walk(funcao):
+        if isinstance(no, ast.Call):
+            alvo = no.func
+            if isinstance(alvo, ast.Attribute):
+                chamadas_ate_o_primeiro_return.append(alvo.attr)
+            elif isinstance(alvo, ast.Name):
+                chamadas_ate_o_primeiro_return.append(alvo.id)
+
+    assert "navigation" in chamadas_ate_o_primeiro_return, (
+        "app.py precisa declarar st.navigation; sem isso o Streamlit lista "
+        "a pasta pages/ sozinho"
+    )
+    assert "require_auth" not in chamadas_ate_o_primeiro_return, (
+        "require_auth() em app.py para a execução antes de a navegação ser "
+        "declarada, e o menu automático aparece"
+    )

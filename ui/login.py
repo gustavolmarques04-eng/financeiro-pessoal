@@ -70,3 +70,8 @@ def sair() -> None:
     st.session_state.pop(CHAVE_SESSAO, None)
     auth.definir_atual(None)
     st.rerun()
+
+
+def definir_usuario(usuario: auth.Usuario) -> None:
+    """Reamarra o dono no contexto desta execução do script."""
+    auth.definir_atual(usuario)
