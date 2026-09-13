@@ -246,8 +246,37 @@ with st.expander("✏️ Editar uma categoria"):
             icon="🔒",
         )
 
+    # Uma caixinha marcada parece valer sozinha. Enquanto houver diferença
+    # entre o que está na tela e o que está gravado, é preciso dizer em voz
+    # alta que falta salvar — senão a pessoa sai da página achando que
+    # mudou algo, e nada mudou.
+    pendentes = [
+        rotulo
+        for rotulo, na_tela, gravado in (
+            ("nome", novo_nome.strip(), escolhida.name),
+            ("emoji", novo_emoji.strip() or None, escolhida.emoji),
+            ("ordem", int(nova_ordem), escolhida.display_order),
+            ("meta", meta_cents, escolhida.target_amount_cents),
+            ("patrimônio", patrimonio, escolhida.include_in_net_worth),
+            ("dividendos", dividendos, escolhida.receives_dividends),
+            ("capital investido", capital, escolhida.counts_as_investment_capital),
+        )
+        if na_tela != gravado
+    ]
+    if pendentes:
+        st.warning(
+            "Alterações não salvas em: " + ", ".join(pendentes)
+            + ". Clique em **Salvar categoria**.",
+            icon="✏️",
+        )
+
     col_g, col_h = st.columns(2)
-    if col_g.button("Salvar categoria", use_container_width=True, key="salvar_cat"):
+    if col_g.button(
+        "Salvar categoria",
+        use_container_width=True,
+        key="salvar_cat",
+        type="primary" if pendentes else "secondary",
+    ):
         with session_scope() as session:
             permitido, motivo = cat.pode_trocar_comportamento(
                 session, escolhida.id, novo_comportamento
